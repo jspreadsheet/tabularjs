@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TabularJS - Spreadsheet File Parser Demo</title>
+    <script src="https://jspreadsheet.com/v12/jspreadsheet.js"></script>
+    <script src="https://jsuites.net/v6/jsuites.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@jspreadsheet/formula-pro@6.0.0-beta.1/dist/index.min.js"></script>
+    <link rel="stylesheet" href="https://jspreadsheet.com/v12/jspreadsheet.css" type="text/css" />
+    <link rel="stylesheet" href="https://jsuites.net/v6/jsuites.css" type="text/css" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Material+Icons" />
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            border-bottom: 2px solid #4472C4;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin: 0 0 10px 0;
+        }
+        .tagline {
+            color: #7f8c8d;
+            font-size: 18px;
+            margin: 0;
+        }
+        .info-box {
+            background: #f8f9fa;
+            border-left: 4px solid #4472C4;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .info-box h3 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .info-box p {
+            margin: 10px 0;
+            line-height: 1.6;
+        }
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 12px 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .supported-formats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 10px 0;
+        }
+        .format-badge {
+            background: #4472C4;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .load-btn {
+            background: #4472C4;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 20px 0;
+        }
+        .load-btn:hover {
+            background: #365a9b;
+        }
+        #spreadsheet {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TabularJS Demo</h1>
+        <p class="tagline">Universal Spreadsheet File Parser for JavaScript</p>
+    </div>
+
+    <div class="info-box">
+        <h3>About TabularJS</h3>
+        <p><strong>TabularJS</strong> is a standalone library that converts spreadsheet files into JSON format.
+        It supports 16+ file formats including Excel, OpenDocument, CSV, HTML tables, and more.</p>
+        <p><strong>For this demo we use Jspreadsheet Pro. For more information about Jspreadsheet Pro: https://jspreadsheet.com</strong>
+    </div>
+
+    <div class="note">
+        <strong>Note:</strong> TabularJS is format-agnostic. Use the parsed output with any spreadsheet component, data visualization library, or custom application.
+    </div>
+
+    <div>
+        <h3>Supported Formats</h3>
+        <div class="supported-formats">
+            <span class="format-badge">.xlsx</span>
+            <span class="format-badge">.xls</span>
+            <span class="format-badge">.ods</span>
+            <span class="format-badge">.csv</span>
+            <span class="format-badge">.tsv</span>
+            <span class="format-badge">.xml</span>
+            <span class="format-badge">.html</span>
+            <span class="format-badge">.slk</span>
+            <span class="format-badge">.dif</span>
+            <span class="format-badge">.dbf</span>
+            <span class="format-badge">.wks</span>
+            <span class="format-badge">...and more</span>
+        </div>
+    </div>
+
+    <input type="file" name="file" id='file' style='display:none'>
+    <button class="load-btn" onclick="document.getElementById('file').click()">Load Spreadsheet File</button>
+
+    <div id="spreadsheet"></div>
+
+<script type="text/javascript" src="index.js"></script>
+
+<script>
+// Using tab
+jspreadsheet.setLicense('ZDQ4ZDc3N2FkOGRkYTY1ZDZmZjJhZDk3N2Q3Y2JmMWU4NjRlM2UzNzU2OThlOWNjYmZiMzM0NTc1ZmU2ODdlZWUyYjlkNGNlZjhhMDg2NTA4MzQ3NWRjNTNkMzMwNDAzMDRiOGZjZDc4ODQ1ZDAzZDYxNzE1ZDQwZDc0NzdkMTIsZXlKamJHbGxiblJKWkNJNklqTTFObUV4T1RKaU56a3hNMkl3TkdNMU5EVTNOR1F4T0dNeU9HUTBObVUyTXprMU5ESTRZV0lpTENKdVlXMWxJam9pVUdGMWJDQkliMlJsYkNJc0ltUmhkR1VpT2pFM09UVXpNRFUyTURBc0ltUnZiV0ZwYmlJNld5SnFjMmhsYkd3dWJtVjBJaXdpWTNOaUxtRndjQ0lzSW1wemNISmxZV1J6YUdWbGRDNWpiMjBpTENKalpIQnVMbWx2SWl3aWFXNTBjbUZ6YUdWbGRITXVZMjl0SWl3aWMzUmhZMnRpYkdsMGVpNWpiMjBpTENKM1pXSmpiMjUwWVdsdVpYSXVhVzhpTENKM1pXSmpiMjUwWVdsdVpYSXVhVzhpTENKdmNtZG1ZWEp0TFRabU9URm1ZVFZoWWprdFpHVjJMV1ZrTG1SbGRtVnNiM0F1YkdsbmFIUnVhVzVuTG1admNtTmxMbU52YlNJc0luTjBZV05yWW14cGRIb3VhVzhpTENKelptTnZaR1ZpYjNRdVkyOXRJaXdpYkc5allXeG9iM04wSWwwc0luQnNZVzRpT2lJek5DSXNJbk5qYjNCbElqcGJJblkzSWl3aWRqZ2lMQ0oyT1NJc0luWXhNQ0lzSW5ZeE1TSXNJbll4TWlJc0ltWnZjbTExYkdFaUxDSm1iM0p0Y3lJc0luSmxibVJsY2lJc0luQmhjbk5sY2lJc0ltbHRjRzl5ZEdWeUlpd2ljMlZoY21Ob0lpd2lZMjl0YldWdWRITWlMQ0oyWVd4cFpHRjBhVzl1Y3lJc0ltTm9ZWEowY3lJc0luQnlhVzUwSWl3aVltRnlJaXdpYzJobFpYUnpJaXdpYzJoaGNHVnpJaXdpYzJWeWRtVnlJaXdpWm05eWJXRjBJaXdpZEc5d2JXVnVkU0lzSW1sdWRISmhjMmhsWlhSeklsMTk=');
+
+
+jspreadsheet.setExtensions({ formula });
+
+// Root
+let root = document.getElementById('spreadsheet');
+
+// Create the spreadsheet from a local file
+let load = function(e) {
+    const file = e.target.files[0];
+
+    console.time();
+    // Use our parser to parse the file
+    tabularjs(file, {
+        onload: function(result) {
+
+            result.tableOverflow = true;
+
+            console.log(result)
+            console.timeEnd();
+            jspreadsheet(root, result);
+        },
+        onerror: function(error) {
+            alert(error);
+        }
+    });
+}
+
+document.getElementById("file").onchange = (e) => load(e)
+</script>
+
+</body>
+</html>
