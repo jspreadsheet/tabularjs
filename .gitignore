@@ -7,3 +7,10 @@ coverage/
 *.log
 .DS_Store
 .env
+/IMPROVEMENTS.md
+/.idea/modules.xml
+/.idea/php.xml
+/.claude/settings.local.json
+/.idea/tabularjs.iml
+/.github/workflows/test.yml
+/.idea/vcs.xml

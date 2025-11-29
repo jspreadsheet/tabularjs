@@ -1,6 +1,6 @@
 {
   "name": "tabularjs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Professional JavaScript library for converting spreadsheet files to JSON format. Supports 16+ file formats for use in Node.js and browser applications.",
   "type": "module",
   "main": "dist/index.js",
