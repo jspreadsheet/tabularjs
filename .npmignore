@@ -1,0 +1,49 @@
+# Development files
+.idea/
+.vscode/
+.project
+.settings/
+.claude/
+*.log
+*.swp
+*.swo
+
+# Source files (we ship dist/ only)
+src/
+test/
+samples/
+
+# Build configuration
+webpack.config.js
+mocha.config.js
+.babelrc
+.eslintrc*
+tsconfig.json
+
+# Development environment
+public/
+node_modules/
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.travis.yml
+.circleci/
+
+# Documentation source
+docs/
+
+# Misc
+TODO.txt
+*.md.backup
+coverage/
+.nyc_output/
+*.tgz
+.DS_Store
+
+IMPROVEMENTS.md
+CONTRIBUTING.md
