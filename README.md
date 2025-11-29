@@ -126,7 +126,7 @@ TabularJS is an independent file conversion tool. While it can be used with any 
 
 ```jsx
 import { useRef } from 'react';
-import jspreadsheet from 'jspreadsheet-pro';
+import jspreadsheet from 'jspreadsheet-ce';
 import tabularjs from 'tabularjs';
 
 export default function App() {
@@ -181,7 +181,7 @@ export default function App() {
 </template>
 
 <script>
-import jspreadsheet from 'jspreadsheet-pro';
+import jspreadsheet from 'jspreadsheet-ce';
 import tabularjs from 'tabularjs';
 
 export default {
@@ -200,18 +200,18 @@ export default {
 
 ## Formula Support
 
-| Format | Formula Support | Notes |
-|--------|----------------|-------|
-| XLS | ✅ Full | Decoded from BIFF PTG tokens |
-| XLSX | ✅ Full | Native formula strings |
-| ODS | ✅ Full | Native formula strings |
-| XML 2003 | ✅ Full | Formula attribute |
-| SYLK | ✅ Full | E parameter |
-| HTML | ✅ Partial | Via `data-formula` attribute |
-| CSV/TSV/TXT | ❌ No | Data-only format |
-| DIF | ❌ No | Data-only format (stores calculated values) |
-| DBF | ❌ No | Database format (stores calculated values) |
-| Lotus | ❌ Limited | Complex token format |
+| Format      | Formula Support | Notes                                       |
+|-------------|-----------------|---------------------------------------------|
+| XLS         | ✅ Full          | Decoded from BIFF PTG tokens                |
+| XLSX        | ✅ Full          | Native formula strings                      |
+| ODS         | ✅ Full          | Native formula strings                      |
+| XML 2003    | ✅ Full          | Formula attribute                           |
+| SYLK        | ✅ Full          | E parameter                                 |
+| HTML        | ✅ Partial       | Via `data-formula` attribute                |
+| CSV/TSV/TXT | ❌ No            | Data-only format                            |
+| DIF         | ❌ No            | Data-only format (stores calculated values) |
+| DBF         | ❌ No            | Database format (stores calculated values)  |
+| Lotus       | ❌ Limited       | Complex token format                        |
 
 ## Scope & Limitations
 
