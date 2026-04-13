@@ -14,3 +14,7 @@ coverage/
 /.idea/tabularjs.iml
 /.github/workflows/test.yml
 /.idea/vcs.xml
+/.claude
+/website/.next/
+/website/node_modules/
+/website/package-lock.json

@@ -1,0 +1,181 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+/* DARK THEME (default) */
+:root,
+html.dark {
+  --surface: 7 9 12;
+  --surface-soft: 11 15 20;
+  --panel: 15 20 27;
+  --subtle: 26 34 45;
+  --subtle-strong: 34 44 56;
+  --border: 26 34 45;
+  --border-strong: 34 44 56;
+  --fg: 230 237 243;
+  --fg-muted: 192 202 214;
+  --fg-subtle: 139 152 165;
+  --fg-faint: 74 86 99;
+
+  --bg-glow-1: 52 211 153;
+  --bg-glow-2: 163 230 53;
+  --bg-glow-3: 16 185 129;
+  --grid-line: 255 255 255;
+  --grid-alpha: 0.04;
+}
+
+/* LIGHT THEME */
+html.light {
+  --surface: 255 255 255;
+  --surface-soft: 249 250 251;
+  --panel: 255 255 255;
+  --subtle: 243 244 246;
+  --subtle-strong: 229 231 235;
+  --border: 229 231 235;
+  --border-strong: 209 213 219;
+  --fg: 17 24 39;
+  --fg-muted: 55 65 81;
+  --fg-subtle: 107 114 128;
+  --fg-faint: 156 163 175;
+
+  --bg-glow-1: 16 185 129;
+  --bg-glow-2: 132 204 22;
+  --bg-glow-3: 52 211 153;
+  --grid-line: 0 0 0;
+  --grid-alpha: 0.045;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: rgb(var(--surface));
+  color: rgb(var(--fg));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgb(var(--bg-glow-1) / 0.16), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 10%, rgb(var(--bg-glow-2) / 0.1), transparent),
+    radial-gradient(ellipse 50% 40% at 20% 30%, rgb(var(--bg-glow-3) / 0.07), transparent),
+    rgb(var(--surface));
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgb(var(--bg-glow-1) / 0.3);
+  color: rgb(var(--fg));
+}
+
+.grid-pattern {
+  background-image:
+    linear-gradient(to right, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse 60% 50% at 50% 0%, black 40%, transparent 80%);
+}
+
+.gradient-text {
+  background: linear-gradient(90deg, #10b981, #65a30d, #10b981);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradient-x 6s ease infinite;
+}
+html.dark .gradient-text {
+  background: linear-gradient(90deg, #34d399, #a3e635, #34d399);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradient-x 6s ease infinite;
+}
+
+.glow-border {
+  position: relative;
+}
+.glow-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgb(var(--bg-glow-1) / 0.5), rgb(var(--bg-glow-2) / 0.3), transparent);
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.prose-invert-custom h1,
+.prose-invert-custom h2,
+.prose-invert-custom h3 {
+  color: rgb(var(--fg));
+}
+.prose-invert-custom p,
+.prose-invert-custom li {
+  color: rgb(var(--fg-muted));
+}
+.prose-invert-custom code {
+  background: rgb(var(--panel));
+  color: #10b981;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  border: 1px solid rgb(var(--border));
+}
+html.dark .prose-invert-custom code {
+  color: #6ee7b7;
+}
+.prose-invert-custom pre {
+  background: #0b0f14;
+  border: 1px solid #1a222d;
+  border-radius: 10px;
+  padding: 16px;
+  overflow-x: auto;
+}
+.prose-invert-custom pre code {
+  background: transparent;
+  padding: 0;
+  color: #e6edf3;
+  border: none;
+}
+
+/* Code blocks stay dark in both themes for readability */
+.code-surface {
+  background: #0b0f14;
+  border-color: #1a222d;
+  color: #e6edf3;
+}
+.code-surface-header {
+  background: #0f141b;
+  border-color: #1a222d;
+}
+
+/* scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: rgb(var(--surface));
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border-strong));
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--fg-faint));
+}
