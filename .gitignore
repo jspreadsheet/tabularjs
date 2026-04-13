@@ -18,3 +18,4 @@ coverage/
 /website/.next/
 /website/node_modules/
 /website/package-lock.json
+/.idea/workspace.xml
