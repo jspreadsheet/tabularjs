@@ -1,4 +1,5 @@
 import { loadAsBuffer, parse } from '../utils/loader.js';
+import { readZipEntry } from '../utils/zip-utils.js';
 import JSZip from 'jszip';
 import { parser } from '@lemonadejs/html-to-json';
 import {
@@ -969,14 +970,14 @@ export async function parseODS(input, options = {}) {
             throw new Error('content.xml not found in ODS file');
         }
 
-        const contentXml = await contentFile.async('string');
+        const contentXml = await readZipEntry(contentFile, 'string');
         const content = parser(contentXml);
 
         // Extract styles.xml
         let styles = {};
         const stylesFile = zip.file('styles.xml');
         if (stylesFile) {
-            const stylesXml = await stylesFile.async('string');
+            const stylesXml = await readZipEntry(stylesFile, 'string');
             styles = parseStyles(stylesXml);
         }
 
@@ -987,7 +988,7 @@ export async function parseODS(input, options = {}) {
         // Parse table styles for worksheet visibility
         let tableStyles = {};
         if (stylesFile) {
-            const stylesXml = await stylesFile.async('string');
+            const stylesXml = await readZipEntry(stylesFile, 'string');
             tableStyles = parseTableStyles(stylesXml);
         }
         const contentTableStyles = parseTableStyles(contentXml);
@@ -996,7 +997,7 @@ export async function parseODS(input, options = {}) {
         // Parse number formats from both styles.xml and content.xml
         let numberFormats = {};
         if (stylesFile) {
-            const stylesXml = await stylesFile.async('string');
+            const stylesXml = await readZipEntry(stylesFile, 'string');
             numberFormats = parseNumberFormats(stylesXml);
         }
         const contentFormats = parseNumberFormats(contentXml);
@@ -1038,7 +1039,7 @@ export async function parseODS(input, options = {}) {
         let frozenPanes = {};
         const settingsFile = zip.file('settings.xml');
         if (settingsFile) {
-            const settingsXml = await settingsFile.async('string');
+            const settingsXml = await readZipEntry(settingsFile, 'string');
             const settings = parser(settingsXml);
 
             const findConfig = (node, sheetName) => {

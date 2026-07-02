@@ -1,4 +1,5 @@
 import { loadAsBuffer, parse } from '../utils/loader.js';
+import { readZipEntry } from '../utils/zip-utils.js';
 import JSZip from 'jszip';
 import { parser } from '@lemonadejs/html-to-json';
 import {
@@ -59,7 +60,7 @@ async function parseSharedStrings(zip) {
 
     if (!file) return sharedStrings;
 
-    const xml = await file.async('string');
+    const xml = await readZipEntry(file, 'string');
     const parsed = parser(xml);
 
     // Find all <si> (string item) elements
@@ -88,7 +89,7 @@ async function parseStyles(zip) {
     const file = zip.file('xl/styles.xml');
     if (!file) return styles;
 
-    const xml = await file.async('string');
+    const xml = await readZipEntry(file, 'string');
     const parsed = parser(xml);
 
     // Get default theme colors
@@ -424,7 +425,7 @@ async function parseDrawings(zip, sheetIndex) {
     const drawingsFile = zip.file(`xl/drawings/drawing${sheetIndex}.xml`);
     if (!drawingsFile) return [];
 
-    const xml = await drawingsFile.async('string');
+    const xml = await readZipEntry(drawingsFile, 'string');
     const parsed = parser(xml);
     const media = [];
 
@@ -464,6 +465,26 @@ async function parseDrawings(zip, sheetIndex) {
     return media;
 }
 
+/**
+ * Resolve an OPC relationship target against a base directory inside the zip.
+ * Handles ./ and ../ segments and absolute (/xl/...) targets; never escapes
+ * the archive root. Exported for tests.
+ */
+export function resolveZipPath(baseDir, target) {
+    if (!target) {
+        return '';
+    }
+    const parts = target.startsWith('/') ? [] : baseDir.split('/').filter(Boolean);
+    for (const segment of target.replace(/^\//, '').split('/')) {
+        if (segment === '..') {
+            parts.pop();
+        } else if (segment && segment !== '.') {
+            parts.push(segment);
+        }
+    }
+    return parts.join('/');
+}
+
 // Parse image from anchor
 async function parseImage(zip, sheetIndex, anchor, pic) {
     const mediaObj = {};
@@ -479,19 +500,19 @@ async function parseImage(zip, sheetIndex, anchor, pic) {
         // Get the drawing relationships to find the actual image file
         const relsFile = zip.file(`xl/drawings/_rels/drawing${sheetIndex}.xml.rels`);
         if (relsFile) {
-            const relsXml = await relsFile.async('string');
+            const relsXml = await readZipEntry(relsFile, 'string');
             const relsParsed = parser(relsXml);
             const relationships = findNodes(relsParsed, 'Relationship');
 
             for (const rel of relationships) {
                 const relAttrs = parseAttributes(rel);
                 if (relAttrs.Id === rId) {
-                    const imagePath = `xl/${relAttrs.Target.replace('../', '')}`;
+                    const imagePath = resolveZipPath('xl/drawings', relAttrs.Target);
                     const imageFile = zip.file(imagePath);
 
                     if (imageFile) {
                         // Get image as base64
-                        const imageData = await imageFile.async('base64');
+                        const imageData = await readZipEntry(imageFile, 'base64');
                         const extension = imagePath.split('.').pop().toLowerCase();
                         const mimeType = {
                             'png': 'image/png',
@@ -788,7 +809,7 @@ async function parseChart(zip, sheetIndex, anchor, graphicFrameNode) {
     const relsFile = zip.file(`xl/drawings/_rels/drawing${sheetIndex}.xml.rels`);
     if (!relsFile) return null;
 
-    const relsXml = await relsFile.async('string');
+    const relsXml = await readZipEntry(relsFile, 'string');
     const relsParsed = parser(relsXml);
     const relationships = findNodes(relsParsed, 'Relationship');
 
@@ -796,7 +817,7 @@ async function parseChart(zip, sheetIndex, anchor, graphicFrameNode) {
     for (const rel of relationships) {
         const relAttrs = parseAttributes(rel);
         if (relAttrs.Id === rId) {
-            chartPath = `xl/${relAttrs.Target.replace('../', '')}`;
+            chartPath = resolveZipPath('xl/drawings', relAttrs.Target);
             break;
         }
     }
@@ -807,7 +828,7 @@ async function parseChart(zip, sheetIndex, anchor, graphicFrameNode) {
     const chartFile = zip.file(chartPath);
     if (!chartFile) return null;
 
-    const chartXml = await chartFile.async('string');
+    const chartXml = await readZipEntry(chartFile, 'string');
     const chartParsed = parser(chartXml);
 
     // Determine chart type (c: namespace for chart elements)
@@ -1122,7 +1143,7 @@ async function parseComments(zip, sheetIndex) {
     const commentsFile = zip.file(`xl/comments${sheetIndex}.xml`);
     if (!commentsFile) return {};
 
-    const xml = await commentsFile.async('string');
+    const xml = await readZipEntry(commentsFile, 'string');
     const parsed = parser(xml);
     const comments = {};
 
@@ -1156,7 +1177,7 @@ async function parseHyperlinks(zip, sheetIndex, sheetParsed) {
     const relsFile = zip.file(`xl/worksheets/_rels/sheet${sheetIndex}.xml.rels`);
     if (!relsFile) return {};
 
-    const relsXml = await relsFile.async('string');
+    const relsXml = await readZipEntry(relsFile, 'string');
     const relsParsed = parser(relsXml);
 
     // Get all hyperlink elements
@@ -1198,7 +1219,7 @@ async function parseWorksheet(zip, sheetPath, sheetIndex, sharedStrings, styles)
     const file = zip.file(sheetPath);
     if (!file) return null;
 
-    const xml = await file.async('string');
+    const xml = await readZipEntry(file, 'string');
     const parsed = parser(xml);
 
     const result = {
@@ -1900,7 +1921,7 @@ async function parseWorkbook(zip) {
     const file = zip.file('xl/workbook.xml');
     if (!file) throw new Error('workbook.xml not found');
 
-    const xml = await file.async('string');
+    const xml = await readZipEntry(file, 'string');
     const parsed = parser(xml);
 
     const sheets = [];

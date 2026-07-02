@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { loadAsBuffer, parse } from '../utils/loader.js';
+import { readZipEntry } from '../utils/zip-utils.js';
 
 /**
  * Parse Apple Numbers file (.numbers format)
@@ -230,7 +231,7 @@ async function parseNumbersFromZip(zip) {
         throw new Error('Invalid .numbers file: Index.zip not found');
     }
 
-    const indexZipBuffer = await indexZipFile.async('nodebuffer');
+    const indexZipBuffer = await readZipEntry(indexZipFile, 'nodebuffer');
     const indexZip = await JSZip.loadAsync(indexZipBuffer);
 
     // Find .iwa files (iWork Archive files containing Protobuf data)
@@ -247,7 +248,7 @@ async function parseNumbersFromZip(zip) {
     const allMessages = [];
     for (const { path, file } of iwaFiles) {
         try {
-            const buffer = await file.async('nodebuffer');
+            const buffer = await readZipEntry(file, 'nodebuffer');
             const messages = parseIWA(buffer);
             allMessages.push(...messages);
             console.log(`Numbers: Parsed ${messages.length} messages from ${path}`);

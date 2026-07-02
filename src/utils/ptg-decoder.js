@@ -827,6 +827,41 @@ function formatRowRef(row, isAbsolute) {
 }
 
 /**
+ * Decode a BIFF8 RgceLoc operand (tRef/tArea): 16-bit absolute row and
+ * 14-bit absolute column. The relative flags (bits 15/14 of the column
+ * field) only control $ display - the stored coordinates are absolute.
+ */
+function formatLoc(rowField, colField) {
+    const rowRel = (colField & 0x8000) !== 0;
+    const colRel = (colField & 0x4000) !== 0;
+    return formatColRef(colField & 0x3FFF, !colRel) + formatRowRef(rowField, !rowRel);
+}
+
+/**
+ * Decode a BIFF8 RgceLocRel operand (tRefN/tAreaN): when a relative flag is
+ * set, the field is a signed offset from the host cell (row: 16-bit two's
+ * complement, column: 8-bit two's complement); otherwise it is absolute.
+ */
+function formatLocRel(rowField, colField, cellContext) {
+    const rowRel = (colField & 0x8000) !== 0;
+    const colRel = (colField & 0x4000) !== 0;
+    let rowNum = rowField;
+    let colNum = colField & 0x3FFF;
+
+    if (rowRel) {
+        if (rowNum & 0x8000) rowNum -= 0x10000; // Sign-extend 16-bit offset
+        if (cellContext) rowNum += cellContext.row;
+    }
+    if (colRel) {
+        colNum = colField & 0xFF;
+        if (colNum & 0x80) colNum -= 0x100; // Sign-extend 8-bit offset
+        if (cellContext) colNum += cellContext.col;
+    }
+
+    return formatColRef(colNum, !colRel) + formatRowRef(rowNum, !rowRel);
+}
+
+/**
  * Decode BIFF PTG tokens to formula string
  * @param {Uint8Array} tokens - Binary formula tokens
  * @param {boolean} debug - Enable debug logging
@@ -845,10 +880,6 @@ export function decodePTG(tokens, debug = false, cellContext = null) {
     const stack = [];
     let pos = 0;
 
-    // Calculate offset for adjusting relative references in shared formulas
-    const rowOffset = cellContext ? (cellContext.row - (cellContext.baseRow || 0)) : 0;
-    const colOffset = cellContext ? (cellContext.col - (cellContext.baseCol || 0)) : 0;
-
     while (pos < tokens.length) {
         const rawToken = tokens[pos];
         const baseToken = rawToken & 0x1F; // Base token (bits 0-4)
@@ -864,112 +895,48 @@ export function decodePTG(tokens, debug = false, cellContext = null) {
         if (rawToken >= 0x20) {
             // Handle extended tokens with class bits
             switch (baseToken) {
-                // Cell reference
+                // Cell reference (absolute storage, flags only affect $ display)
                 case PTG.tRef:
                     if (pos + 4 <= tokens.length) {
                         const row = readUInt16LE(tokens, pos);
                         const col = readUInt16LE(tokens, pos + 2);
-                        const rowRel = (col & 0x8000) !== 0;
-                        const colRel = (col & 0x4000) !== 0;
-                        let colNum = col & 0xFF; // Column is 8 bits
-                        let rowNum = row & 0x3FFF; // Row is 14 bits
-
-                        // Handle relative references
-                        // In BIFF8, relative references store OFFSETS, not absolute positions
-                        // Negative offsets use two's complement
-                        if (rowRel) {
-                            // Sign-extend from 14 bits
-                            if (rowNum & 0x2000) {
-                                rowNum = rowNum | 0xFFFFC000; // Sign extend to 32-bit negative
-                                rowNum = rowNum | 0; // Convert to proper negative number
-                            }
-                            // Apply offset to get absolute row
-                            if (cellContext) {
-                                rowNum = cellContext.baseRow + rowNum + rowOffset;
-                            }
-                        } else if (cellContext && rowOffset !== 0) {
-                            // Absolute reference, no adjustment needed
-                        }
-
-                        if (colRel) {
-                            // Sign-extend from 8 bits
-                            if (colNum & 0x80) {
-                                colNum = colNum | 0xFFFFFF00; // Sign extend to 32-bit negative
-                                colNum = colNum | 0; // Convert to proper negative number
-                            }
-                            // Apply offset to get absolute column
-                            if (cellContext) {
-                                colNum = cellContext.baseCol + colNum + colOffset;
-                            }
-                        } else if (cellContext && colOffset !== 0) {
-                            // Absolute reference, no adjustment needed
-                        }
-
-                        const colStr = formatColRef(colNum, !colRel);
-                        const rowStr = formatRowRef(rowNum, !rowRel);
-                        stack.push(colStr + rowStr);
+                        stack.push(formatLoc(row, col));
                         pos += 4;
                     }
                     break;
 
-                // Relative cell reference (used in shared formulas)
-                // tRefN stores offsets from the base cell, not absolute positions
+                // Relative cell reference (used in shared formulas and names)
+                // tRefN stores signed offsets from the host cell
                 case PTG.tRefN:
                     if (pos + 4 <= tokens.length) {
                         const row = readUInt16LE(tokens, pos);
                         const col = readUInt16LE(tokens, pos + 2);
-                        const rowRel = (col & 0x8000) !== 0;
-                        const colRel = (col & 0x4000) !== 0;
-
-                        // Extract raw offset values
-                        let rowOffset = row & 0x3FFF; // 14-bit row offset
-                        let colOffset = col & 0xFF;   // 8-bit column offset
-
-                        // Sign-extend negative offsets (two's complement)
-                        if (rowOffset & 0x2000) {
-                            rowOffset = rowOffset | 0xFFFFC000;
-                        }
-                        if (colOffset & 0x80) {
-                            colOffset = colOffset | 0xFFFFFF00;
-                        }
-
-                        // Calculate absolute position from base cell + offset
-                        let rowNum = cellContext ? cellContext.row + rowOffset : rowOffset;
-                        let colNum = cellContext ? cellContext.col + colOffset : colOffset;
-
-                        const colStr = formatColRef(colNum, !colRel);
-                        const rowStr = formatRowRef(rowNum, !rowRel);
-                        stack.push(colStr + rowStr);
+                        stack.push(formatLocRel(row, col, cellContext));
                         pos += 4;
                     }
                     break;
 
-                // Area reference (range)
+                // Area reference (absolute storage, flags only affect $ display)
                 case PTG.tArea:
                     if (pos + 8 <= tokens.length) {
                         const row1 = readUInt16LE(tokens, pos);
                         const row2 = readUInt16LE(tokens, pos + 2);
                         const col1 = readUInt16LE(tokens, pos + 4);
                         const col2 = readUInt16LE(tokens, pos + 6);
+                        stack.push(`${formatLoc(row1, col1)}:${formatLoc(row2, col2)}`);
+                        pos += 8;
+                    }
+                    break;
 
-                        const row1Rel = (col1 & 0x8000) !== 0;
-                        const col1Rel = (col1 & 0x4000) !== 0;
-                        let col1Num = col1 & 0x3FFF;
-                        let row1Num = row1 & 0x3FFF;
-
-                        const row2Rel = (col2 & 0x8000) !== 0;
-                        const col2Rel = (col2 & 0x4000) !== 0;
-                        let col2Num = col2 & 0x3FFF;
-                        let row2Num = row2 & 0x3FFF;
-
-                        // Adjust relative references for shared formulas
-                        if (row1Rel && rowOffset !== 0) row1Num += rowOffset;
-                        if (col1Rel && colOffset !== 0) col1Num += colOffset;
-                        if (row2Rel && rowOffset !== 0) row2Num += rowOffset;
-                        if (col2Rel && colOffset !== 0) col2Num += colOffset;
-
-                        const cell1 = formatColRef(col1Num, !col1Rel) + formatRowRef(row1Num, !row1Rel);
-                        const cell2 = formatColRef(col2Num, !col2Rel) + formatRowRef(row2Num, !row2Rel);
+                // Relative area reference (used in shared formulas and names)
+                case PTG.tAreaN:
+                    if (pos + 8 <= tokens.length) {
+                        const row1 = readUInt16LE(tokens, pos);
+                        const row2 = readUInt16LE(tokens, pos + 2);
+                        const col1 = readUInt16LE(tokens, pos + 4);
+                        const col2 = readUInt16LE(tokens, pos + 6);
+                        const cell1 = formatLocRel(row1, col1, cellContext);
+                        const cell2 = formatLocRel(row2, col2, cellContext);
                         stack.push(`${cell1}:${cell2}`);
                         pos += 8;
                     }

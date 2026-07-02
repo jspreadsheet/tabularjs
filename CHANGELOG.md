@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Packaging**: the npm package could not be imported in Node.js at all - `main` pointed at a UMD bundle inside a `"type": "module"` package, so the UMD wrapper ran as ESM (where top-level `this` is undefined) and threw. Added an `exports` map: Node resolves the ESM source, bundlers/browsers get a real ES module bundle (`dist/index.mjs`), and `<script>` tags keep the UMD build (now using `globalThis`)
+- **XLS formulas**: BIFF8 row references were masked to 14 bits (rows above 16384 decoded wrong) and "relative" rows >= 8193 in normal formulas were corrupted by bogus sign-extension; `tRef`/`tArea` now decode as absolute storage per spec
+- **XLS shared formulas**: `tAreaN` tokens (ranges in shared formulas) were not handled, derailing token parsing; `tRefN`/`tAreaN` offsets now sign-extend correctly (16-bit rows, 8-bit columns)
+- **XLSX assets**: relationship targets with multiple `../` segments (images, charts) failed to resolve; replaced string hacking with proper OPC path resolution
+- **Encoding**: `detectEncoding` aliased windows-1251 (Cyrillic) to latin1 and CJK encodings to utf-8, producing mojibake; decoding now goes through `TextDecoder` (all WHATWG labels) with an iconv-lite fallback for DOS codepages
+
+### Added
+- Buffer input: `tabularjs(uint8Array | arrayBuffer | buffer)` now works as documented, plus an `options.extension` override
+- Content-based format detection (magic bytes) when the extension is missing or unrecognized - zip containers (xlsx/ods/numbers), OLE2, Lotus, dBase, SYLK, DIF, XML, HTML, CSV/TSV
+- Apple Numbers (.numbers) parser wired into format dispatch (experimental)
+- Zip decompression caps on all xlsx/ods/numbers entry reads (zip-bomb protection, counts actual inflated bytes)
+- CFB (OLE2) stream allocations clamped to the container size; FAT chain length bounded (crafted .xls DoS protection)
+- 62 new regression tests (374 total)
+
+### Changed
+- Browser bundles no longer inline iconv-lite/chardet code tables: 512 KiB -> 196 KiB; both are now declared `optionalDependencies` for Node users
+
 ## [1.0.1] - 2025-11-29
 
 ### Added

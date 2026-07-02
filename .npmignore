@@ -8,8 +8,7 @@
 *.swp
 *.swo
 
-# Source files (we ship dist/ only)
-src/
+# Source files (src/ ships: Node resolves the "node" exports condition to it)
 test/
 samples/
 

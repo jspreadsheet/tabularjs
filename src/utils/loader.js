@@ -37,56 +37,40 @@ export async function loadAsBuffer(input) {
  * Load file as string - Direct, no intermediate steps
  */
 export async function loadAsString(input, encoding = 'utf-8') {
-    // Encodings that require iconv-lite (not supported by Node.js or TextDecoder)
-    const needsIconv = ['cp850', 'cp437', 'cp866', 'windows-1250', 'windows-1251',
-                        'windows-1252', 'windows-1253', 'windows-1254', 'windows-1255',
-                        'windows-1256', 'windows-1257', 'windows-1258', 'iso-8859-2',
-                        'iso-8859-3', 'iso-8859-4', 'iso-8859-5', 'iso-8859-6',
-                        'iso-8859-7', 'iso-8859-8', 'iso-8859-9', 'iso-8859-10',
-                        'iso-8859-13', 'iso-8859-14', 'iso-8859-15', 'iso-8859-16',
-                        'koi8-r', 'koi8-u', 'macintosh'].includes(encoding.toLowerCase());
+    const enc = (encoding || 'utf-8').toLowerCase();
 
-    // If encoding requires iconv-lite
-    if (needsIconv) {
-        if (!iconv) {
-            try {
-                const iconvModule = await import('iconv-lite');
-                iconv = iconvModule.default || iconvModule;
-            } catch (e) {
-                throw new Error(`Encoding '${encoding}' requires iconv-lite package. Install with: npm install iconv-lite`);
-            }
+    // Fast paths for UTF-8
+    if (enc === 'utf-8' || enc === 'utf8') {
+        if (typeof input === 'string') {
+            if (!fs) fs = await import('fs');
+            return fs.readFileSync(input, 'utf-8');
         }
-
-        // Load as buffer first
-        const buffer = await loadAsBuffer(input);
-        return iconv.decode(Buffer.from(buffer), encoding);
-    }
-
-    // Standard encodings supported by Node.js and browsers
-    // File path (Node.js)
-    if (typeof input === 'string') {
-        if (!fs) fs = await import('fs');
-        return fs.readFileSync(input, encoding);
-    }
-
-    // File/Blob (Browser)
-    if (typeof File !== 'undefined' && input instanceof File ||
-        typeof Blob !== 'undefined' && input instanceof Blob) {
-        if (encoding === 'utf-8') {
+        if (typeof File !== 'undefined' && input instanceof File ||
+            typeof Blob !== 'undefined' && input instanceof Blob) {
             return input.text();
-        } else {
-            // For non-UTF-8 encodings in browser, read as buffer and decode
-            const buffer = await input.arrayBuffer();
-            return new TextDecoder(encoding).decode(buffer);
         }
     }
 
-    // Buffer/Uint8Array
-    if (input instanceof Uint8Array || typeof Buffer !== 'undefined' && Buffer.isBuffer(input)) {
-        return new TextDecoder(encoding).decode(input);
+    const buffer = await loadAsBuffer(input);
+
+    // TextDecoder covers all WHATWG Encoding Standard labels (windows-125x,
+    // iso-8859-x, koi8, shift_jis, gbk, big5, euc-jp/kr, ...) in both
+    // Node.js and browsers
+    try {
+        return new TextDecoder(enc).decode(buffer);
+    } catch (e) {
+        // Unknown label - fall back to iconv-lite below (cp437, cp850, ...)
     }
 
-    throw new Error('Invalid input: expected file path, File, Blob, Uint8Array, or Buffer');
+    if (!iconv) {
+        try {
+            const iconvModule = await import('iconv-lite');
+            iconv = iconvModule.default || iconvModule;
+        } catch (e) {
+            throw new Error(`Encoding '${encoding}' requires iconv-lite package. Install with: npm install iconv-lite`);
+        }
+    }
+    return iconv.decode(Buffer.from(buffer), encoding);
 }
 
 /**
@@ -116,19 +100,22 @@ export async function detectEncoding(input) {
         // Detect encoding
         const detected = chardet.default.detect(buffer);
 
-        // Map common chardet names to Node.js encoding names
+        // Map chardet names to TextDecoder labels. Every label here is a
+        // real decoder for that encoding - do NOT alias unrelated encodings
+        // (the old map decoded Cyrillic and CJK files as latin1/utf-8).
         const encodingMap = {
             'UTF-8': 'utf-8',
             'UTF-16LE': 'utf-16le',
             'UTF-16BE': 'utf-16be',
             'ISO-8859-1': 'latin1',
-            'windows-1252': 'latin1', // Node.js treats windows-1252 as latin1
-            'windows-1251': 'latin1',
-            'GB2312': 'utf-8', // Fallback to utf-8 for Chinese
-            'Big5': 'utf-8',   // Fallback to utf-8 for Traditional Chinese
-            'EUC-JP': 'utf-8', // Fallback to utf-8 for Japanese
-            'EUC-KR': 'utf-8', // Fallback to utf-8 for Korean
-            'Shift_JIS': 'utf-8'
+            'windows-1252': 'windows-1252',
+            'windows-1251': 'windows-1251',
+            'GB2312': 'gb2312',
+            'GB18030': 'gb18030',
+            'Big5': 'big5',
+            'EUC-JP': 'euc-jp',
+            'EUC-KR': 'euc-kr',
+            'Shift_JIS': 'shift_jis'
         };
 
         return encodingMap[detected] || detected?.toLowerCase() || 'utf-8';

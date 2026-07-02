@@ -204,14 +204,17 @@ function readChain(buffer, startSector, fat, sectorSize, maxSize = Infinity) {
     let sector = startSector;
     let totalSize = 0;
 
+    // A valid chain cannot have more sectors than the container holds; a
+    // longer chain means a FAT cycle crafted to force huge allocations
+    const maxChainSectors = Math.ceil(buffer.length / sectorSize) + 1;
+
     while (sector < MAXREGSECT && totalSize < maxSize) {
         const sectorData = readSector(buffer, sector, sectorSize);
         chunks.push(sectorData);
         totalSize += sectorSize;
         sector = fat[sector];
 
-        // Prevent infinite loops
-        if (chunks.length > 100000) {
+        if (chunks.length > maxChainSectors) {
             throw new Error('FAT chain too long - possible corruption');
         }
     }
@@ -236,6 +239,10 @@ function readMiniChain(miniStream, startSector, miniFat, miniSectorSize, size) {
     if (startSector >= MAXREGSECT) {
         return new Uint8Array(0);
     }
+
+    // The declared stream size comes from the directory entry of an
+    // untrusted file; the real content can never exceed the mini stream
+    size = Math.min(size, miniStream.length);
 
     const result = new Uint8Array(size);
     let sector = startSector;

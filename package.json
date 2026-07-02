@@ -4,10 +4,21 @@
   "description": "Professional JavaScript library for converting spreadsheet files to JSON format. Supports 16+ file formats for use in Node.js and browser applications.",
   "type": "module",
   "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./src/index.js",
+      "default": "./dist/index.mjs"
+    },
+    "./dist/index.js": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "start": "webpack serve --mode development --config webpack.config.js --watch",
-    "build": "webpack --mode production && node -e \"require('fs').copyFileSync('src/index.d.ts', 'dist/index.d.ts')\"",
+    "build": "node -e \"require('fs').rmSync('dist', {recursive: true, force: true})\" && webpack --mode production && node -e \"require('fs').copyFileSync('src/index.d.ts', 'dist/index.d.ts')\"",
     "test": "mocha test/**/*.test.js",
     "test:coverage": "c8 --reporter=text --reporter=html --reporter=lcov npm test",
     "test:watch": "mocha test/**/*.test.js --watch"
@@ -52,6 +63,10 @@
   "dependencies": {
     "@lemonadejs/html-to-json": "^1.0.0",
     "jszip": "^3.10.1"
+  },
+  "optionalDependencies": {
+    "chardet": "^2.0.0",
+    "iconv-lite": "^0.6.3"
   },
   "devDependencies": {
     "c8": "^10.1.3",

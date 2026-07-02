@@ -501,6 +501,105 @@ describe('PTG Decoder', () => {
         });
     });
 
+    describe('High Row References (regression)', () => {
+        // BIFF8 rows are 16-bit (0-65535). These regress the old 14-bit
+        // mask (& 0x3FFF) and the bogus sign-extension of "relative" rows,
+        // which corrupted any reference to rows >= 8193.
+
+        it('should decode relative reference to row 10001 (tRef, bit 13 set)', () => {
+            // Row 10000 (0x2710), col 0, both relative
+            const tokens = new Uint8Array([
+                0x24,           // tRef
+                0x10, 0x27,     // row 10000
+                0x00, 0xC0      // col 0, relative flags
+            ]);
+            expect(decodePTG(tokens)).to.equal('A10001');
+        });
+
+        it('should decode relative reference to row 20001 (tRef, > 14 bits)', () => {
+            // Row 20000 (0x4E20), col 0, both relative
+            const tokens = new Uint8Array([
+                0x24,           // tRef
+                0x20, 0x4E,     // row 20000
+                0x00, 0xC0      // col 0, relative flags
+            ]);
+            expect(decodePTG(tokens)).to.equal('A20001');
+        });
+
+        it('should decode absolute reference to the last row (tRef, row 65536)', () => {
+            const tokens = new Uint8Array([
+                0x24,           // tRef
+                0xFF, 0xFF,     // row 65535
+                0x00, 0x00      // col 0, absolute
+            ]);
+            expect(decodePTG(tokens)).to.equal('$A$65536');
+        });
+
+        it('should decode a full-height range (tArea, rows above 16384)', () => {
+            const tokens = new Uint8Array([
+                0x25,           // tArea
+                0x00, 0x00,     // row1 = 0
+                0xFF, 0xFF,     // row2 = 65535
+                0x00, 0xC0,     // col1 = 0 (relative)
+                0x00, 0xC0      // col2 = 0 (relative)
+            ]);
+            expect(decodePTG(tokens)).to.equal('A1:A65536');
+        });
+    });
+
+    describe('Shared Formula References (tRefN/tAreaN)', () => {
+        it('should apply signed row/col offsets from the host cell (tRefN)', () => {
+            // Offset row -2 (0xFFFE), col +1, both relative; host cell C6 (row 5, col 2)
+            const tokens = new Uint8Array([
+                0x2C,           // tRefN
+                0xFE, 0xFF,     // row offset -2
+                0x01, 0xC0      // col offset +1, relative flags
+            ]);
+            const result = decodePTG(tokens, false, { row: 5, col: 2 });
+            expect(result).to.equal('D4');
+        });
+
+        it('should sign-extend negative column offsets (tRefN)', () => {
+            // Offset row 0, col -1 (0xFF); host cell C6 (row 5, col 2)
+            const tokens = new Uint8Array([
+                0x2C,           // tRefN
+                0x00, 0x00,     // row offset 0
+                0xFF, 0xC0      // col offset -1, relative flags
+            ]);
+            const result = decodePTG(tokens, false, { row: 5, col: 2 });
+            expect(result).to.equal('B6');
+        });
+
+        it('should decode relative area in a shared formula (tAreaN)', () => {
+            // Rows -1..+1, cols -1..+1 around host cell D11 (row 10, col 3)
+            const tokens = new Uint8Array([
+                0x2D,           // tAreaN
+                0xFF, 0xFF,     // row1 offset -1
+                0x01, 0x00,     // row2 offset +1
+                0xFF, 0xC0,     // col1 offset -1, relative
+                0x01, 0xC0      // col2 offset +1, relative
+            ]);
+            const result = decodePTG(tokens, false, { row: 10, col: 3 });
+            expect(result).to.equal('C10:E12');
+        });
+
+        it('should not derail token parsing after tAreaN (regression)', () => {
+            // tAreaN used to fall through to the "unknown token" path, leaving
+            // its 8 operand bytes to be misread as tokens. SUM over a tAreaN
+            // range must still produce a sane function call.
+            const tokens = new Uint8Array([
+                0x2D,           // tAreaN
+                0x00, 0x00,     // row1 offset 0
+                0x02, 0x00,     // row2 offset +2
+                0x00, 0xC0,     // col1 offset 0, relative
+                0x00, 0xC0,     // col2 offset 0, relative
+                0x22, 0x01, 0x04, 0x00  // tFuncVar, 1 arg, SUM
+            ]);
+            const result = decodePTG(tokens, false, { row: 0, col: 0 });
+            expect(result).to.equal('SUM(A1:A3)');
+        });
+    });
+
     describe('Token Class Bits', () => {
         it('should handle token with VALUE class (0x20)', () => {
             // tRef with VALUE class
