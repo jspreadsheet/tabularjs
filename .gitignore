@@ -1,9 +1,5 @@
 /package-lock.json
-/samples/*
-# Small fixtures required by the test suite (CI needs them)
-!/samples/test.xls
-!/samples/test1.xlsx
-!/samples/test1.csv
+/samples/
 node_modules/
 # dist/ is committed for CDN usage; track only the build outputs
 dist/*
