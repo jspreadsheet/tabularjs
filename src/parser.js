@@ -11,7 +11,7 @@ import { parseCSVFile, parseCSVString } from './parser/csv.js';
 import { parseXMLSpreadsheet } from './parser/xml.js';
 import { parseDIF } from './parser/dif.js';
 import { parseSLK } from './parser/slk.js';
-import { parseHTMLTable} from './parser/table.js';
+import { parseHTMLTable, parseAllHTMLTables, isHTMLString } from './parser/table.js';
 import { parseDBF } from './parser/dbf.js';
 import { parseNumbers } from './parser/numbers.js';
 import { loadAsBuffer } from './utils/loader.js';
@@ -29,9 +29,8 @@ import JSZip from 'jszip';
  * @param {Object} [options={}] - Parser options
  * @param {string} [options.extension] - Force a format (e.g. 'xlsx') instead of detecting it
  * @param {string} [options.delimiter=','] - CSV delimiter (for CSV/TSV files)
- * @param {number} [options.tableIndex=0] - Table index to parse (for HTML with multiple tables)
+ * @param {number} [options.tableIndex] - HTML: return only this table (0-based); by default one worksheet per table
  * @param {boolean} [options.firstRowAsHeader=true] - Treat first row as header (for HTML/CSV)
- * @param {number} [options.worksheetIndex] - Specific worksheet to parse (0-based)
  * @param {Function} [options.onload] - Callback when parsing completes
  * @param {Function} [options.onerror] - Callback when parsing fails
  *
@@ -78,6 +77,11 @@ import JSZip from 'jszip';
 export default async function parser(file, options = {}) {
     if (!file) {
         throw new Error('Invalid file');
+    }
+
+    // HTML markup or a DOM element: not a file path
+    if (isHTMLString(file) || (typeof HTMLElement !== 'undefined' && file instanceof HTMLElement)) {
+        return dispatch('html', file, options);
     }
 
     // Normalize raw byte inputs so the loaders can consume them
@@ -163,7 +167,7 @@ function dispatch(ext, file, options) {
         case 'tab':
             return parseCSVFile(file, { ...options, delimiter: '\t' });
         case 'txt':
-            return parseCSVFile(file, { ...options, delimiter: '\t' });
+            return parseCSVFile(file, { delimiter: '\t', ...options }); // tab unless the caller picks one
         case 'xml':
             return parseXMLSpreadsheet(file, options);
         case 'dif':
@@ -173,7 +177,10 @@ function dispatch(ext, file, options) {
             return parseSLK(file, options);
         case 'html':
         case 'htm':
-            return parseHTMLTable(file, options);
+            // One worksheet per <table>, or only the one tableIndex picks
+            return options.tableIndex === undefined
+                ? parseAllHTMLTables(file, options)
+                : parseHTMLTable(file, options);
         case 'dbf':
             return parseDBF(file, options);
         default:

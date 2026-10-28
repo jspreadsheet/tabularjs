@@ -2,7 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.1.0] - 2026-10-28
+
+### Added
+- **XLS formulas - references to other sheets**: `Sheet2!A1`, `'My Sheet'!A1:B2`, multi-sheet ranges (`Sheet1:Sheet3!A1`) and external workbooks (`'[Book2.xls]Prices'!A1`), resolved through SUPBOOK / EXTERNSHEET (`tRef3d`, `tArea3d`, `tRefErr3d`, `tAreaErr3d`); references to deleted sheets become `#REF!`
+- **XLS formulas - names**: defined names (`=SUM(Total)`), built-in names (`Print_Area`...), external names (`[Book2.xls]!Rate`) and add-in / user-defined functions (`MYUDF(A1)`) via NAME / EXTERNNAME (`tName`, `tNameX`)
+- **XLS formulas - arrays**: array formulas (ARRAY record) on every cell of their range, and array constants (`{1,2;"a",TRUE}`) read from RgbExtra (`tArray`)
+- **XLS formulas**: memory tokens (`tMemArea`, `tMemFunc`, `tMemErr`, ...) and the full error set (`#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A`)
+- Encrypted .xls: workbooks protected with Office 97 RC4 and Excel's default password (write-protected / "read-only recommended" files) are decrypted; other passwords, RC4 CryptoAPI and XOR obfuscation raise a clear "Workbook is encrypted" error instead of parsing ciphertext (which ran out of memory)
+- `parseWorkbookStream(bytes)` export: parse a raw BIFF8 Workbook stream
+- TypeScript definitions for the byte input (`Uint8Array | ArrayBuffer`) and `options.extension` added in 2.0.0, for `onload` / `onerror`, and for `worksheetState`, `gridline`, `media` and `definedNames`, which the parsers already returned
+- **HTML input**: `tabularjs('<table>...</table>')` and DOM elements now work as documented (a string starting with `<` is markup, not a file path); before, HTML strings failed with `Unsupported file type`
+- 51 new regression tests (425 total): HTML strings and multiple tables, CSV encoding, TXT delimiter, XLS records (SST rich/phonetic/CONTINUE, embedded charts, chart sheets, RC4, sheet/name/external references, array formulas, cached results), PTG 3-D refs/names/arrays/tMem, truncated CFB files
+
+### Fixed
+- **XLS strings**: the Shared String Table ignored rich-text runs, phonetic (Far East) data and CONTINUE records; after the first formatted string every later cell read the wrong string (or garbage with control characters), and strings past the first 8 KB were lost. Measured on 400 real-world workbooks against xlrd: 0 value mismatches after the fix (was ~40% of workbooks with corrupted text)
+- **XLS sheets**: cells were assigned to sheets by counting worksheet BOF records, so a chart embedded in a worksheet ended the sheet early (cells after it dropped) and a chart sheet shifted every following sheet's data; records are now mapped through the BOUNDSHEET stream offsets
+- **XLS formula results**: boolean, error and empty-string cached results were read as numbers (wrong offset of the `fExprO` marker); BOOLERR errors now read as `#DIV/0!` etc. instead of `#ERROR7`
+- **XLS**: LABEL records (inline strings written by older tools) were ignored
+- **XLS formulas**: zero-argument functions (`NOW()`, `TODAY()`, `PI()`, `TRUE()`...) swallowed the preceding operand
+- **XLS formulas**: a formula that cannot be decoded faithfully now shows the value Excel cached for the cell instead of `=ERROR` or a wrong formula
+- **CSV**: `options.encoding` was ignored and files were always decoded as UTF-8; it now accepts any TextDecoder label (and iconv-lite codepages in Node)
+- **TXT**: a `delimiter` passed for `.txt` files was overridden by tab
+- Removed the undocumented `options.worksheetIndex` from the JSDoc: it was never implemented
+- **CFB**: truncated files (last sector partial, or chains running past the end) threw `Sector out of bounds`; the readable part is now returned
+
+### Changed
+- **HTML**: every `<table>` on the page becomes a worksheet (`Table1`, `Table2`...); before, only the first table was returned. Pass `tableIndex` to get a single table as before
+- Internal `decodePTG(tokens, debug, cellContext, ctx)` is now strict: it throws `PTGError` on unknown tokens, truncated input, stack underflow or leftover operands instead of guessing, and takes a 4th `ctx` argument (workbook context for sheet and name references). Not part of the public API
+
+## [2.0.0] - 2026-10-09
 
 ### Fixed
 - **Packaging**: the npm package could not be imported in Node.js at all - `main` pointed at a UMD bundle inside a `"type": "module"` package, so the UMD wrapper ran as ESM (where top-level `this` is undefined) and threw. Added an `exports` map: Node resolves the ESM source, bundlers/browsers get a real ES module bundle (`dist/index.mjs`), and `<script>` tags keep the UMD build (now using `globalThis`)

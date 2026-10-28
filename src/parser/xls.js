@@ -1,6 +1,7 @@
 import { loadAsBuffer, parse } from '../utils/loader.js';
 import CFB from '../utils/cfb.js';
-import { decodePTG } from '../utils/ptg-decoder.js';
+import { decodePTG, BUILTIN_NAMES } from '../utils/ptg-decoder.js';
+import { decryptWorkbook } from '../utils/xls-crypto.js';
 import {
     getColumnName,
     getCellNameFromCoords,
@@ -24,6 +25,12 @@ const BIFF_RECORDS = {
     BOOLERR: 0x0205,
     FORMULA: 0x0006,
     SHRFMLA: 0x04BC,
+    ARRAY: 0x0221,
+    NAME: 0x0018,
+    EXTERNSHEET: 0x0017,
+    SUPBOOK: 0x01AE,
+    EXTERNNAME: 0x0023,
+    CONTINUE: 0x003C,
     ROW: 0x0208,
     DIMENSIONS: 0x0200,
     XF: 0x00E0,
@@ -40,38 +47,120 @@ const BIFF_RECORDS = {
     STRING: 0x0207
 };
 
-function parseSST(data, offset, length) {
-    // Parse Shared String Table
-    const strings = [];
-    let pos = offset + 8; // Skip header
-    const end = offset + length;
+// BErr codes of BOOLERR records and formula results
+const BIFF_ERRORS = { 0x00: '#NULL!', 0x07: '#DIV/0!', 0x0F: '#VALUE!', 0x17: '#REF!', 0x1D: '#NAME?', 0x24: '#NUM!', 0x2A: '#N/A' };
 
-    while (pos < end) {
-        if (pos + 3 > end) break;
+/**
+ * Parse the Shared String Table. [MS-XLS] 2.4.265 SST + 2.5.293 XLUnicodeRichExtendedString: each string is
+ * cch (2), flags (1: fHighByte 0x01, fExtSt 0x04, fRichSt 0x08), [cRun (2)], [cbExtRst (4)], characters,
+ * [cRun * 4 bytes of formatting runs], [cbExtRst bytes of phonetic data]. The table continues in CONTINUE
+ * records (records[index + 1...]); a string's characters may break across them, and the continuation then
+ * starts with a new flags byte that can switch between 8-bit and 16-bit characters.
+ */
+function parseSST(records, index) {
+    const segments = [records[index].data];
+    for (let k = index + 1; k < records.length && records[k].type === BIFF_RECORDS.CONTINUE; k++) {
+        segments.push(records[k].data);
+    }
+    let seg = 0;
+    let pos = 8; // cstTotal (4) + cstUnique (4)
+    const unique = segments[0].length >= 8 ? readUInt32LE(segments[0], 4) : 0;
 
-        const strLen = readUInt16LE(data, pos);
-        const flags = data[pos + 2];
-        pos += 3;
-
-        const isCompressed = (flags & 0x01) === 0;
-        let str = '';
-
-        if (isCompressed) {
-            // 8-bit characters
-            for (let i = 0; i < strLen && pos < end; i++, pos++) {
-                str += String.fromCharCode(data[pos]);
-            }
-        } else {
-            // 16-bit characters
-            for (let i = 0; i < strLen && pos + 1 < end; i++, pos += 2) {
-                str += String.fromCharCode(readUInt16LE(data, pos));
-            }
+    // move to the next segment when the current one is exhausted; false at the end of the table
+    const ensure = () => {
+        while (seg < segments.length && pos >= segments[seg].length) {
+            seg++;
+            pos = 0;
         }
+        return seg < segments.length;
+    };
+    const byte = () => {
+        if (!ensure()) throw new RangeError('SST truncated');
+        return segments[seg][pos++];
+    };
+    const u16 = () => byte() | (byte() << 8);
+    const u32 = () => (u16() | (u16() << 16)) >>> 0;
+    const skip = (n) => {
+        while (n > 0 && ensure()) {
+            const take = Math.min(n, segments[seg].length - pos);
+            pos += take;
+            n -= take;
+        }
+    };
 
-        strings.push(str);
+    const strings = [];
+    try {
+        while (strings.length < unique && ensure()) {
+            const cch = u16();
+            const flags = byte();
+            let high = flags & 0x01;
+            const runs = flags & 0x08 ? u16() : 0;
+            const ext = flags & 0x04 ? u32() : 0;
+            const chars = [];
+            while (chars.length < cch) {
+                if (pos >= segments[seg].length) {
+                    // the characters continue in the next CONTINUE record, after a new flags byte
+                    seg++;
+                    pos = 0;
+                    if (seg >= segments.length) break;
+                    high = segments[seg][pos++] & 0x01;
+                    continue;
+                }
+                const data = segments[seg];
+                if (high) {
+                    if (pos + 1 >= data.length) {
+                        pos = data.length;
+                        continue;
+                    }
+                    chars.push(data[pos] | (data[pos + 1] << 8));
+                    pos += 2;
+                } else {
+                    chars.push(data[pos++]);
+                }
+            }
+            let str = '';
+            for (let i = 0; i < chars.length; i += 8192) {
+                str += String.fromCharCode.apply(null, chars.slice(i, i + 8192));
+            }
+            strings.push(str);
+            skip(runs * 4 + ext);
+        }
+    } catch (err) {
+        // a truncated table: keep the strings read so far
     }
 
     return strings;
+}
+
+/**
+ * Assign every record to the sheet whose substream holds it (record.sheet = index into the BOUNDSHEET list,
+ * -1 for the workbook globals and for chart substreams). A substream starts with a BOF at the stream offset that
+ * its BOUNDSHEET records; charts embedded in a worksheet nest their own BOF ... EOF inside it.
+ */
+function assignSheets(records, sheetOffsets) {
+    const byOffset = new Map(sheetOffsets.map((off, i) => [off, i]));
+    const stack = []; // sheet index of each open substream
+    let nextByOrder = 0;
+    for (const record of records) {
+        if (record.type === BIFF_RECORDS.BOF) {
+            const dt = record.data.length >= 4 ? readUInt16LE(record.data, 2) : 0;
+            let sheet = -1;
+            if (stack.length === 0 && dt !== 0x0005) {
+                // a top-level substream after the globals: find it by offset, else by order
+                sheet = byOffset.has(record.offset - 4) ? byOffset.get(record.offset - 4) : nextByOrder;
+                nextByOrder = sheet + 1;
+                if (dt === 0x0020) sheet = -1; // chart sheet: no cells
+            }
+            stack.push(sheet);
+            record.sheet = -1;
+            continue;
+        }
+        record.sheet = stack.length === 1 ? stack[0] : -1;
+        if (record.type === BIFF_RECORDS.EOF && stack.length) {
+            stack.pop();
+            record.sheet = -1;
+        }
+    }
 }
 
 function parseBIFFRecords(data) {
@@ -289,32 +378,12 @@ function parseXF(records, formats, fonts) {
 
 function parseColumnInfo(records) {
     const columnsBySheet = {};
-    let currentSheet = -1;
-    let inSheet = false;
-
     for (const record of records) {
-        // Track worksheet boundaries
-        if (record.type === BIFF_RECORDS.BOF) {
-            const data = record.data;
-            const type = readUInt16LE(data, 2);
-            if (type === 0x0010) { // Worksheet BOF
-                currentSheet++;
-                inSheet = true;
-                if (!columnsBySheet[currentSheet]) {
-                    columnsBySheet[currentSheet] = [];
-                }
-            }
-            continue;
+        const currentSheet = record.sheet;
+        if (currentSheet === undefined || currentSheet < 0) continue;
+        if (!columnsBySheet[currentSheet]) {
+            columnsBySheet[currentSheet] = [];
         }
-
-        if (record.type === BIFF_RECORDS.EOF) {
-            if (inSheet) {
-                inSheet = false;
-            }
-            continue;
-        }
-
-        if (!inSheet) continue;
 
         if (record.type === BIFF_RECORDS.COLINFO) {
             const data = record.data;
@@ -339,32 +408,12 @@ function parseColumnInfo(records) {
 
 function parseRowInfo(records) {
     const rowsBySheet = {};
-    let currentSheet = -1;
-    let inSheet = false;
-
     for (const record of records) {
-        // Track worksheet boundaries
-        if (record.type === BIFF_RECORDS.BOF) {
-            const data = record.data;
-            const type = readUInt16LE(data, 2);
-            if (type === 0x0010) { // Worksheet BOF
-                currentSheet++;
-                inSheet = true;
-                if (!rowsBySheet[currentSheet]) {
-                    rowsBySheet[currentSheet] = {};
-                }
-            }
-            continue;
+        const currentSheet = record.sheet;
+        if (currentSheet === undefined || currentSheet < 0) continue;
+        if (!rowsBySheet[currentSheet]) {
+            rowsBySheet[currentSheet] = {};
         }
-
-        if (record.type === BIFF_RECORDS.EOF) {
-            if (inSheet) {
-                inSheet = false;
-            }
-            continue;
-        }
-
-        if (!inSheet) continue;
 
         if (record.type === BIFF_RECORDS.ROW) {
             const data = record.data;
@@ -384,33 +433,14 @@ function parseRowInfo(records) {
 
 function parseMergedCells(records) {
     const mergedCellsBySheet = {};
-    let currentSheet = -1;
-    let inSheet = false;
-
     for (const record of records) {
-        // Track worksheet boundaries
-        if (record.type === BIFF_RECORDS.BOF) {
-            const data = record.data;
-            const type = readUInt16LE(data, 2);
-            if (type === 0x0010) { // Worksheet BOF
-                currentSheet++;
-                inSheet = true;
-                if (!mergedCellsBySheet[currentSheet]) {
-                    mergedCellsBySheet[currentSheet] = [];
-                }
-            }
-            continue;
+        const currentSheet = record.sheet;
+        if (currentSheet === undefined || currentSheet < 0) continue;
+        if (!mergedCellsBySheet[currentSheet]) {
+            mergedCellsBySheet[currentSheet] = [];
         }
 
-        if (record.type === BIFF_RECORDS.EOF) {
-            if (inSheet) {
-                inSheet = false;
-            }
-            continue;
-        }
-
-        // Only process merged cells within a worksheet
-        if (inSheet && record.type === BIFF_RECORDS.MERGECELLS) {
+        if (record.type === BIFF_RECORDS.MERGECELLS) {
             const data = record.data;
             const count = readUInt16LE(data, 0);
 
@@ -435,34 +465,123 @@ function parseMergedCells(records) {
     return mergedCellsBySheet;
 }
 
+/**
+ * Read an XLUnicodeString (cch: 2 bytes) or ShortXLUnicodeString (cch: 1 byte) at pos -> [string, next pos]
+ */
+function readXLString(data, pos, cchBytes) {
+    const cch = cchBytes === 2 ? readUInt16LE(data, pos) : data[pos];
+    pos += cchBytes;
+    const unicode = data[pos] & 0x01;
+    pos++;
+    let str = '';
+    for (let i = 0; i < cch && pos < data.length; i++) {
+        str += String.fromCharCode(unicode ? readUInt16LE(data, pos) : data[pos]);
+        pos += unicode ? 2 : 1;
+    }
+    return [str, pos];
+}
+
+/**
+ * Workbook-globals records that formulas refer to: SUPBOOK (+ EXTERNNAME), EXTERNSHEET and NAME.
+ * -> { sheets, supbooks: [{type, name, sheetNames, externNames}], externSheets: [{supbook, first, last}], names: [{name}] }
+ */
+function parseFormulaContext(records, sheetNames) {
+    const ctx = { sheets: sheetNames, supbooks: [], externSheets: [], names: [] };
+    for (let i = 0; i < records.length; i++) {
+        const record = records[i];
+        if (record.type === BIFF_RECORDS.BOF && readUInt16LE(record.data, 2) === 0x0010) {
+            break; // first worksheet: the globals are over
+        }
+        let data = record.data;
+        try {
+            if (record.type === BIFF_RECORDS.SUPBOOK) {
+                const ctab = readUInt16LE(data, 0);
+                const cch = readUInt16LE(data, 2);
+                if (cch === 0x0401) {
+                    ctx.supbooks.push({ type: 'self', externNames: [] });
+                } else if (cch === 0x3A01) {
+                    ctx.supbooks.push({ type: 'addin', externNames: [] });
+                } else {
+                    let [path, pos] = readXLString(data, 2, 2);
+                    const sheets = [];
+                    for (let k = 0; k < ctab && pos < data.length; k++) {
+                        let name;
+                        [name, pos] = readXLString(data, pos, 2);
+                        sheets.push(name);
+                    }
+                    // VirtualPath: control characters separate volume / directories; keep the file name
+                    const name = path.split(/[\x00-\x08\\/]/).filter(Boolean).pop() || path;
+                    ctx.supbooks.push({ type: 'external', name, sheetNames: sheets, externNames: [] });
+                }
+            } else if (record.type === BIFF_RECORDS.EXTERNNAME && ctx.supbooks.length) {
+                // flags (2) + reserved / ixals (4) + ShortXLUnicodeString name (add-in UDF or external name)
+                const [name] = readXLString(data, 6, 1);
+                ctx.supbooks[ctx.supbooks.length - 1].externNames.push(name);
+            } else if (record.type === BIFF_RECORDS.EXTERNSHEET) {
+                // the XTI array may continue in CONTINUE records
+                const parts = [data];
+                for (let k = i + 1; k < records.length && records[k].type === BIFF_RECORDS.CONTINUE; k++) {
+                    parts.push(records[k].data);
+                }
+                if (parts.length > 1) {
+                    data = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+                    let off = 0;
+                    for (const p of parts) {
+                        data.set(p, off);
+                        off += p.length;
+                    }
+                }
+                const n = readUInt16LE(data, 0);
+                for (let k = 0; k < n && 2 + 6 * k + 6 <= data.length; k++) {
+                    ctx.externSheets.push({
+                        supbook: readUInt16LE(data, 2 + 6 * k),
+                        first: readUInt16LE(data, 4 + 6 * k),
+                        last: readUInt16LE(data, 6 + 6 * k)
+                    });
+                }
+            } else if (record.type === BIFF_RECORDS.NAME) {
+                // flags (2), chKey (1), cch (1), cce (2), reserved (2), itab (2), reserved (4), name (flags byte + chars)
+                const flags = readUInt16LE(data, 0);
+                const cch = data[3];
+                const unicode = data[14] & 0x01;
+                let name = '';
+                for (let k = 0, pos = 15; k < cch && pos < data.length; k++, pos += unicode ? 2 : 1) {
+                    name += String.fromCharCode(unicode ? readUInt16LE(data, pos) : data[pos]);
+                }
+                if (flags & 0x0020) {
+                    name = BUILTIN_NAMES[name.charCodeAt(0)] || name;
+                }
+                ctx.names.push({ name });
+            }
+        } catch (err) {
+            // a malformed globals record only makes the formulas that use it undecodable
+        }
+    }
+    return ctx;
+}
+
 function parseCellRecords(records, sst, xfStyles, workbookData) {
     const cells = [];
     const shrfmlaRecords = []; // Store SHRFMLA records for second pass
-    let inSheet = false;
-    let sheetIndex = -1;
     let lastFormulaCell = null;
 
     // First pass: collect all cells and SHRFMLA records
     for (const record of records) {
         const data = record.data;
+        const sheetIndex = record.sheet;
+        if (sheetIndex === undefined || sheetIndex < 0) continue;
 
-        if (record.type === BIFF_RECORDS.BOF) {
-            const type = readUInt16LE(data, 2);
-            if (type === 0x0010) { // Worksheet BOF
-                inSheet = true;
-                sheetIndex++;
-            }
-            continue;
+        // Parse LABEL (inline string; older writers use it instead of LABELSST)
+        if (record.type === BIFF_RECORDS.LABEL) {
+            cells.push({
+                row: readUInt16LE(data, 0),
+                col: readUInt16LE(data, 2),
+                value: readXLString(data, 6, 2)[0],
+                type: 'string',
+                style: xfStyles[readUInt16LE(data, 4)] || null,
+                sheetIndex
+            });
         }
-
-        if (record.type === BIFF_RECORDS.EOF) {
-            if (inSheet) {
-                inSheet = false; // End of current sheet, continue to next
-            }
-            continue;
-        }
-
-        if (!inSheet) continue;
 
         // Parse LABELSST (string from SST)
         if (record.type === BIFF_RECORDS.LABELSST) {
@@ -526,10 +645,22 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
             let value = null;
             let formulaType = 'number';
 
-            // Check if it's a string result (0xFFFF in first 2 bytes)
-            if (resultBytes[0] === 0xFF && resultBytes[1] === 0xFF) {
-                formulaType = 'string';
-                // String result will be in next STRING record
+            // FormulaValue: fExprO = 0xFFFF in bytes 6-7 marks a non-number; byte 0 is its type
+            // (0 string in the next STRING record, 1 boolean, 2 error, 3 empty string)
+            if (resultBytes[6] === 0xFF && resultBytes[7] === 0xFF) {
+                const kind = resultBytes[0];
+                if (kind === 0) {
+                    formulaType = 'string';
+                } else if (kind === 1) {
+                    formulaType = 'boolean';
+                    value = resultBytes[2] !== 0;
+                } else if (kind === 2) {
+                    formulaType = 'error';
+                    value = BIFF_ERRORS[resultBytes[2]] || '#N/A';
+                } else {
+                    formulaType = 'string';
+                    value = '';
+                }
             } else {
                 // Numeric result
                 value = readFloat64LE(resultBytes, 0);
@@ -542,6 +673,7 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
             // Offset 22+: formula tokens (rgce)
             const formulaLen = readUInt16LE(data, 20);
             const formulaTokens = data.slice(22, 22 + formulaLen);
+            const formulaExtra = data.slice(22 + formulaLen); // RgbExtra: tArray constants
 
             lastFormulaCell = {
                 row,
@@ -550,6 +682,7 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
                 type: 'formula',
                 formulaType,
                 formula: Array.from(formulaTokens), // Store raw tokens
+                formulaExtra,
                 style: xfStyles[xfIndex] || null,
                 sheetIndex
             };
@@ -598,6 +731,7 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
             const lastCol = data[5];
             const formulaLen = readUInt16LE(data, 8);
             const sharedFormula = data.slice(10, 10 + formulaLen);
+            const sharedExtra = data.slice(10 + formulaLen);
 
             // Store for later processing
             shrfmlaRecords.push({
@@ -606,7 +740,24 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
                 lastRow,
                 firstCol,
                 lastCol,
-                formula: Array.from(sharedFormula)
+                formula: Array.from(sharedFormula),
+                extra: sharedExtra
+            });
+        }
+
+        // Parse ARRAY (array formula entered with Ctrl+Shift+Enter); cells point to it with tExp like SHRFMLA
+        // RefU (6) + flags (2) + reserved (4) + cce (2) + rgce + RgbExtra
+        if (record.type === BIFF_RECORDS.ARRAY) {
+            const formulaLen = readUInt16LE(data, 12);
+            shrfmlaRecords.push({
+                sheetIndex,
+                firstRow: readUInt16LE(data, 0),
+                lastRow: readUInt16LE(data, 2),
+                firstCol: data[4],
+                lastCol: data[5],
+                formula: Array.from(data.slice(14, 14 + formulaLen)),
+                extra: data.slice(14 + formulaLen),
+                array: true
             });
         }
 
@@ -685,7 +836,7 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
             cells.push({
                 row,
                 col,
-                value: isError ? `#ERROR${boolErr}` : (boolErr !== 0),
+                value: isError ? (BIFF_ERRORS[boolErr] || '#N/A') : (boolErr !== 0),
                 type: isError ? 'error' : 'boolean',
                 style: xfStyles[xfIndex] || null,
                 sheetIndex
@@ -693,23 +844,27 @@ function parseCellRecords(records, sst, xfStyles, workbookData) {
         }
     }
 
-    // Second pass: apply SHRFMLA records to cells with tExp tokens
+    // Second pass: a cell whose formula is tExp (row, col of the base cell) takes the SHRFMLA / ARRAY formula
+    // anchored there. Indexed by sheet + base cell: one pass over the cells, not cells x records.
+    const shrByBase = new Map();
     for (const shr of shrfmlaRecords) {
-        for (const cell of cells) {
-            if (cell.sheetIndex === shr.sheetIndex &&
-                cell.row >= shr.firstRow && cell.row <= shr.lastRow &&
-                cell.col >= shr.firstCol && cell.col <= shr.lastCol &&
-                cell.type === 'formula' &&
-                cell.formula && cell.formula.length > 0 &&
-                cell.formula[0] === 0x01) { // tExp token
-
-                // Replace the tExp reference with the actual shared formula
-                // Store both the formula and the base cell position for relative reference adjustment
+        shrByBase.set(`${shr.sheetIndex}:${shr.firstRow}:${shr.firstCol}`, shr);
+    }
+    for (const cell of cells) {
+        if (cell.type === 'formula' && cell.formula && cell.formula.length >= 5 && cell.formula[0] === 0x01) {
+            const baseRow = cell.formula[1] | (cell.formula[2] << 8);
+            const baseCol = cell.formula[3] | (cell.formula[4] << 8);
+            const shr = shrByBase.get(`${cell.sheetIndex}:${baseRow}:${baseCol}`);
+            if (shr && cell.row >= shr.firstRow && cell.row <= shr.lastRow &&
+                cell.col >= shr.firstCol && cell.col <= shr.lastCol) {
                 cell.formula = shr.formula;
-                cell.sharedFormulaBase = {
-                    row: shr.firstRow,
-                    col: shr.firstCol
-                };
+                cell.formulaExtra = shr.extra;
+                if (shr.array) {
+                    // array formulas store absolute references (RgceLoc), so no host-cell adjustment
+                    cell.arrayFormula = true;
+                } else {
+                    cell.sharedFormulaBase = { row: shr.firstRow, col: shr.firstCol };
+                }
             }
         }
     }
@@ -797,7 +952,7 @@ function styleToCss(style) {
     return css.join('; ');
 }
 
-function cellsToJspreadsheet(cells, columns, rows, mergedCells, formats) {
+function cellsToJspreadsheet(cells, columns, rows, mergedCells, formats, formulaContext = null) {
     if (cells.length === 0) return {
         data: [],
         columns: [],
@@ -808,8 +963,12 @@ function cellsToJspreadsheet(cells, columns, rows, mergedCells, formats) {
     };
 
     // Find dimensions from cells
-    let maxRow = cells.length > 0 ? Math.max(...cells.map(c => c.row)) : 0;
-    let maxCol = cells.length > 0 ? Math.max(...cells.map(c => c.col)) : 0;
+    let maxRow = 0;
+    let maxCol = 0;
+    for (const c of cells) {
+        if (c.row > maxRow) maxRow = c.row;
+        if (c.col > maxCol) maxCol = c.col;
+    }
 
     // Update dimensions based on merged cells
     mergedCells.forEach(merge => {
@@ -847,7 +1006,8 @@ function cellsToJspreadsheet(cells, columns, rows, mergedCells, formats) {
                         baseCol: cell.sharedFormulaBase.col
                     } : null;
 
-                    const formulaStr = decodePTG(new Uint8Array(cell.formula), false, cellContext);
+                    const formulaStr = decodePTG(new Uint8Array(cell.formula), false, cellContext,
+                        { ...(formulaContext || {}), extra: cell.formulaExtra });
 
                     // Store formula in data with = prefix
                     data[cell.row][cell.col] = formulaStr ? '=' + formulaStr : '=';
@@ -858,8 +1018,8 @@ function cellsToJspreadsheet(cells, columns, rows, mergedCells, formats) {
                     }
                     cellsObj[address].formula = formulaStr;
                 } catch (err) {
-                    // Decoding error
-                    data[cell.row][cell.col] = `=ERROR`;
+                    // Undecodable formula: keep the value Excel cached instead of emitting a wrong formula
+                    data[cell.row][cell.col] = cell.value === null || cell.value === undefined ? '' : cell.value;
                 }
             } else {
                 // Formula cell but no tokens
@@ -977,15 +1137,28 @@ export function parseXLSBuffer(buffer) {
         throw new Error('No Workbook stream found in XLS file');
     }
 
-    const workbookData = new Uint8Array(workbookEntry.content);
+    return parseWorkbookStream(new Uint8Array(workbookEntry.content));
+}
+
+/**
+ * Parse a BIFF8 Workbook stream (the content of the CFB "Workbook" entry) -> Jspreadsheet Pro format
+ * @param {Uint8Array} stream
+ */
+export function parseWorkbookStream(stream) {
+    // write-protected workbooks are RC4-encrypted with Excel's default password
+    const workbookData = decryptWorkbook(stream);
     const records = parseBIFFRecords(workbookData);
 
     // Parse Shared String Table
     let sst = [];
-    const sstRecord = records.find(r => r.type === BIFF_RECORDS.SST);
-    if (sstRecord) {
-        sst = parseSST(workbookData, sstRecord.offset, sstRecord.length);
+    const sstIndex = records.findIndex(r => r.type === BIFF_RECORDS.SST);
+    if (sstIndex >= 0) {
+        sst = parseSST(records, sstIndex);
     }
+
+    // Map every record to its sheet substream (BOUNDSHEET lbPlyPos = stream offset of the sheet's BOF)
+    const boundsheetRecords = records.filter(r => r.type === BIFF_RECORDS.BOUNDSHEET);
+    assignSheets(records, boundsheetRecords.map(r => readUInt32LE(r.data, 0)));
 
     // Parse all styling and formatting information
     const fonts = parseFonts(records);
@@ -1036,6 +1209,9 @@ export function parseXLSBuffer(buffer) {
         });
     });
 
+    // Names, external sheets and add-in functions that formulas refer to
+    const formulaContext = parseFormulaContext(records, sheets.map(s => s.name));
+
     // Parse cell data with all information
     const allCells = parseCellRecords(records, sst, xfStyles, workbookData);
 
@@ -1058,7 +1234,7 @@ export function parseXLSBuffer(buffer) {
         const sheetMergedCells = mergedCellsBySheet[index] || [];
         const sheetColumns = columnsBySheet[index] || [];
         const sheetRows = rowsBySheet[index] || {};
-        const sheetData = cellsToJspreadsheet(sheetCells, sheetColumns, sheetRows, sheetMergedCells, formats);
+        const sheetData = cellsToJspreadsheet(sheetCells, sheetColumns, sheetRows, sheetMergedCells, formats, formulaContext);
 
         // Convert worksheet styles from CSS strings to global style indices
         const worksheetStyleIndices = {};

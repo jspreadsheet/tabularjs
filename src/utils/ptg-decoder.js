@@ -811,6 +811,20 @@ const FUNCTION_ARG_COUNTS = {
     65535: 0
 };
 
+FUNCTION_ARG_COUNTS[221] = 0; // TODAY
+
+const ERRORS = { 0x00: '#NULL!', 0x07: '#DIV/0!', 0x0F: '#VALUE!', 0x17: '#REF!', 0x1D: '#NAME?', 0x24: '#NUM!', 0x2A: '#N/A' };
+
+// Built-in defined names (Lbl.fBuiltin): the name is a single character code
+const BUILTIN_NAMES = ['Consolidate_Area', 'Auto_Open', 'Auto_Close', 'Extract', 'Database', 'Criteria', 'Print_Area',
+    'Print_Titles', 'Recorder', 'Data_Form', 'Auto_Activate', 'Auto_Deactivate', 'Sheet_Title', '_FilterDatabase'];
+
+/**
+ * Thrown for a token stream the decoder cannot render faithfully (unknown token, truncated operand, data table).
+ * A wrong formula is worse than no formula, so the caller must not emit a guess.
+ */
+export class PTGError extends Error {}
+
 /**
  * Convert column number to letter with absolute reference if needed
  */
@@ -850,325 +864,394 @@ function formatLocRel(rowField, colField, cellContext) {
 
     if (rowRel) {
         if (rowNum & 0x8000) rowNum -= 0x10000; // Sign-extend 16-bit offset
-        if (cellContext) rowNum += cellContext.row;
+        if (cellContext) rowNum = (rowNum + cellContext.row + 0x10000) % 0x10000;
     }
     if (colRel) {
         colNum = colField & 0xFF;
         if (colNum & 0x80) colNum -= 0x100; // Sign-extend 8-bit offset
-        if (cellContext) colNum += cellContext.col;
+        if (cellContext) colNum = (colNum + cellContext.col + 0x100) % 0x100;
     }
 
     return formatColRef(colNum, !colRel) + formatRowRef(rowNum, !rowRel);
 }
 
 /**
+ * Quote a sheet name for a formula when it is not a plain identifier ('My Sheet'!A1)
+ */
+function quoteSheet(name) {
+    return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) && !/^[A-Za-z]{1,3}\d+$/.test(name)
+        ? name : `'${name.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Sheet prefix of a 3-D reference: ixti indexes EXTERNSHEET, whose entry points to a SUPBOOK
+ */
+function sheetPrefix(ixti, ctx) {
+    const xti = ctx && ctx.externSheets && ctx.externSheets[ixti];
+    if (!xti) {
+        throw new PTGError(`3-D reference to unknown EXTERNSHEET entry ${ixti}`);
+    }
+    const book = ctx.supbooks && ctx.supbooks[xti.supbook];
+    if (xti.first === 0xFFFF || xti.first === 0xFFFE) {
+        return null; // deleted sheet / workbook-level
+    }
+    let names;
+    let prefix = '';
+    if (!book || book.type === 'self') {
+        names = ctx.sheets || [];
+    } else {
+        names = book.sheetNames || [];
+        prefix = `[${book.name}]`;
+    }
+    const first = names[xti.first];
+    const last = names[xti.last];
+    if (first === undefined) {
+        throw new PTGError(`3-D reference to unknown sheet ${xti.first}`);
+    }
+    const label = prefix + first + (xti.last !== xti.first && last !== undefined ? ':' + last : '');
+    return quoteSheet(label) + '!';
+}
+
+/**
+ * Read one constant of a tArray (SerAr in RgbExtra)
+ */
+function readArrayValue(extra, st) {
+    const type = extra[st.pos];
+    st.pos++;
+    switch (type) {
+        case 0x00: st.pos += 8; return '';
+        case 0x01: { const v = readFloat64LE(extra, st.pos); st.pos += 8; return v.toString(); }
+        case 0x02: {
+            const cch = readUInt16LE(extra, st.pos);
+            const unicode = extra[st.pos + 2] & 0x01;
+            st.pos += 3;
+            let s = '';
+            for (let i = 0; i < cch; i++) {
+                s += String.fromCharCode(unicode ? readUInt16LE(extra, st.pos) : extra[st.pos]);
+                st.pos += unicode ? 2 : 1;
+            }
+            return `"${s.replace(/"/g, '""')}"`;
+        }
+        case 0x04: { const v = extra[st.pos]; st.pos += 8; return v ? 'TRUE' : 'FALSE'; }
+        case 0x10: { const v = extra[st.pos]; st.pos += 8; return ERRORS[v] || '#N/A'; }
+        default: throw new PTGError(`unknown array constant type ${type}`);
+    }
+}
+
+/**
  * Decode BIFF PTG tokens to formula string
- * @param {Uint8Array} tokens - Binary formula tokens
+ * @param {Uint8Array} tokens - Binary formula tokens (rgce)
  * @param {boolean} debug - Enable debug logging
- * @param {Object} cellContext - Context for adjusting relative references in shared formulas
+ * @param {Object} cellContext - Host cell, used by the relative references of shared formulas
  * @param {number} cellContext.row - Target cell row (0-based)
  * @param {number} cellContext.col - Target cell column (0-based)
- * @param {number} cellContext.baseRow - Base cell row for shared formula (0-based)
- * @param {number} cellContext.baseCol - Base cell column for shared formula (0-based)
+ * @param {Object} [ctx] - Workbook context: sheets (names), externSheets [{supbook, first, last}],
+ *     supbooks [{type: 'self'|'addin'|'external', name, sheetNames, externNames}], names [{name}],
+ *     extra (Uint8Array, the RgbExtra after rgce, holding tArray constants)
  * @returns {string} Formula string (without leading =)
+ * @throws {PTGError} When the token stream cannot be decoded faithfully
  */
-export function decodePTG(tokens, debug = false, cellContext = null) {
+export function decodePTG(tokens, debug = false, cellContext = null, ctx = null) {
     if (!tokens || tokens.length === 0) {
         return '';
     }
 
     const stack = [];
+    const extraState = { pos: 0 };
     let pos = 0;
+
+    const need = (n) => {
+        if (pos + n > tokens.length) {
+            throw new PTGError(`truncated token at ${pos - 1}`);
+        }
+    };
+    const pop = () => {
+        if (!stack.length) {
+            throw new PTGError('operand stack underflow');
+        }
+        return stack.pop();
+    };
+    const binary = (op) => {
+        const b = pop();
+        const a = pop();
+        stack.push(`${a}${op}${b}`);
+    };
+    const callArgs = (n) => {
+        const args = [];
+        for (let i = 0; i < n; i++) {
+            args.unshift(pop());
+        }
+        return args;
+    };
 
     while (pos < tokens.length) {
         const rawToken = tokens[pos];
-        const baseToken = rawToken & 0x1F; // Base token (bits 0-4)
-        const tokenClass = rawToken & 0x60; // Class bits (bits 5-6)
 
         if (debug) {
-            console.log(`Pos ${pos}: Token 0x${rawToken.toString(16).padStart(2, '0')} (base=0x${baseToken.toString(16).padStart(2, '0')}) Stack before:`, [...stack]);
+            console.log(`Pos ${pos}: Token 0x${rawToken.toString(16).padStart(2, '0')} Stack before:`, [...stack]);
         }
 
         pos++;
 
-        // Extended tokens (>= 0x20) have class bits and use a separate token space
         if (rawToken >= 0x20) {
-            // Handle extended tokens with class bits
-            switch (baseToken) {
-                // Cell reference (absolute storage, flags only affect $ display)
-                case PTG.tRef:
-                    if (pos + 4 <= tokens.length) {
-                        const row = readUInt16LE(tokens, pos);
-                        const col = readUInt16LE(tokens, pos + 2);
-                        stack.push(formatLoc(row, col));
-                        pos += 4;
+            // Operand / function tokens: bits 5-6 are the class (reference / value / array), bits 0-4 the type
+            const base = rawToken & 0x1F;
+            switch (base) {
+                case 0x00: { // tArray: 7 unused bytes, the constants are in RgbExtra
+                    need(7);
+                    pos += 7;
+                    const extra = ctx && ctx.extra;
+                    if (!extra || extraState.pos + 3 > extra.length) {
+                        throw new PTGError('array constant without RgbExtra');
                     }
-                    break;
-
-                // Relative cell reference (used in shared formulas and names)
-                // tRefN stores signed offsets from the host cell
-                case PTG.tRefN:
-                    if (pos + 4 <= tokens.length) {
-                        const row = readUInt16LE(tokens, pos);
-                        const col = readUInt16LE(tokens, pos + 2);
-                        stack.push(formatLocRel(row, col, cellContext));
-                        pos += 4;
-                    }
-                    break;
-
-                // Area reference (absolute storage, flags only affect $ display)
-                case PTG.tArea:
-                    if (pos + 8 <= tokens.length) {
-                        const row1 = readUInt16LE(tokens, pos);
-                        const row2 = readUInt16LE(tokens, pos + 2);
-                        const col1 = readUInt16LE(tokens, pos + 4);
-                        const col2 = readUInt16LE(tokens, pos + 6);
-                        stack.push(`${formatLoc(row1, col1)}:${formatLoc(row2, col2)}`);
-                        pos += 8;
-                    }
-                    break;
-
-                // Relative area reference (used in shared formulas and names)
-                case PTG.tAreaN:
-                    if (pos + 8 <= tokens.length) {
-                        const row1 = readUInt16LE(tokens, pos);
-                        const row2 = readUInt16LE(tokens, pos + 2);
-                        const col1 = readUInt16LE(tokens, pos + 4);
-                        const col2 = readUInt16LE(tokens, pos + 6);
-                        const cell1 = formatLocRel(row1, col1, cellContext);
-                        const cell2 = formatLocRel(row2, col2, cellContext);
-                        stack.push(`${cell1}:${cell2}`);
-                        pos += 8;
-                    }
-                    break;
-
-                // Function with fixed args
-                case PTG.tFunc:
-                    if (pos + 2 <= tokens.length) {
-                        const funcIndex = readUInt16LE(tokens, pos);
-                        pos += 2;
-                        const funcName = FUNCTIONS[funcIndex] || `FUNC${funcIndex}`;
-
-                        // Get argument count for this function
-                        const argCount = FUNCTION_ARG_COUNTS[funcIndex] || 1;
-
-                        if (argCount === -1) {
-                            // Variable arguments - should use tFuncVar, but handle as best effort
-                            const arg = stack.pop() || '';
-                            stack.push(`${funcName}(${arg})`);
-                        } else {
-                            // Pop the specified number of arguments
-                            const args = [];
-                            for (let i = 0; i < argCount; i++) {
-                                args.unshift(stack.pop() || '');
-                            }
-                            stack.push(`${funcName}(${args.join(',')})`);
+                    const cols = extra[extraState.pos] + 1;
+                    const rows = readUInt16LE(extra, extraState.pos + 1) + 1;
+                    extraState.pos += 3;
+                    const lines = [];
+                    for (let r = 0; r < rows; r++) {
+                        const vals = [];
+                        for (let c = 0; c < cols; c++) {
+                            vals.push(readArrayValue(extra, extraState));
                         }
+                        lines.push(vals.join(','));
                     }
+                    stack.push(`{${lines.join(';')}}`);
                     break;
-
-                // Function with variable args
-                case PTG.tFuncVar:
-                    if (pos + 3 <= tokens.length) {
-                        const argCount = tokens[pos];
-                        const funcIndex = readUInt16LE(tokens, pos + 1);
-                        pos += 3;
-                        const funcName = FUNCTIONS[funcIndex & 0x7FFF] || `FUNC${funcIndex & 0x7FFF}`;
-
-                        // Pop arguments from stack
-                        const args = [];
-                        for (let i = 0; i < (argCount & 0x7F); i++) {
-                            args.unshift(stack.pop() || '');
+                }
+                case 0x01: { // tFunc: fixed argument count
+                    need(2);
+                    const funcIndex = readUInt16LE(tokens, pos);
+                    pos += 2;
+                    const funcName = FUNCTIONS[funcIndex];
+                    const argCount = FUNCTION_ARG_COUNTS[funcIndex];
+                    if (!funcName || argCount === undefined) {
+                        throw new PTGError(`unknown fixed-argument function ${funcIndex}`);
+                    }
+                    stack.push(`${funcName}(${callArgs(argCount).join(',')})`);
+                    break;
+                }
+                case 0x02: { // tFuncVar: argument count + function index
+                    need(3);
+                    const argCount = tokens[pos] & 0x7F;
+                    const funcIndex = readUInt16LE(tokens, pos + 1) & 0x7FFF;
+                    pos += 3;
+                    const args = callArgs(argCount);
+                    if (funcIndex === 255) {
+                        // User-defined / add-in function: the first argument is its name (tName / tNameX)
+                        const name = args.shift();
+                        stack.push(`${name}(${args.join(',')})`);
+                    } else {
+                        const funcName = FUNCTIONS[funcIndex];
+                        if (!funcName) {
+                            throw new PTGError(`unknown function ${funcIndex}`);
                         }
                         stack.push(`${funcName}(${args.join(',')})`);
                     }
                     break;
-
-                default:
-                    // Unknown extended token - skip it
+                }
+                case 0x03: { // tName: defined name index (1-based) + 2 unused bytes
+                    need(4);
+                    const idx = readUInt16LE(tokens, pos);
+                    pos += 4;
+                    const name = ctx && ctx.names && ctx.names[idx - 1];
+                    if (!name) {
+                        throw new PTGError(`unknown defined name ${idx}`);
+                    }
+                    stack.push(name.name);
                     break;
+                }
+                case 0x04: // tRef
+                    need(4);
+                    stack.push(formatLoc(readUInt16LE(tokens, pos), readUInt16LE(tokens, pos + 2)));
+                    pos += 4;
+                    break;
+                case 0x05: // tArea
+                    need(8);
+                    stack.push(`${formatLoc(readUInt16LE(tokens, pos), readUInt16LE(tokens, pos + 4))}:` +
+                        `${formatLoc(readUInt16LE(tokens, pos + 2), readUInt16LE(tokens, pos + 6))}`);
+                    pos += 8;
+                    break;
+                case 0x06: // tMemArea: 4 unused bytes + cce; the sub-expression tokens follow and are decoded normally
+                case 0x07: // tMemErr
+                case 0x08: // tMemNoMem
+                    need(6);
+                    pos += 6;
+                    break;
+                case 0x09: // tMemFunc: cce
+                case 0x0E: // tMemAreaN
+                case 0x0F: // tMemNoMemN
+                    need(2);
+                    pos += 2;
+                    break;
+                case 0x0A: // tRefErr
+                    need(4);
+                    pos += 4;
+                    stack.push('#REF!');
+                    break;
+                case 0x0B: // tAreaErr
+                    need(8);
+                    pos += 8;
+                    stack.push('#REF!');
+                    break;
+                case 0x0C: // tRefN: relative to the host cell (shared formulas)
+                    need(4);
+                    stack.push(formatLocRel(readUInt16LE(tokens, pos), readUInt16LE(tokens, pos + 2), cellContext));
+                    pos += 4;
+                    break;
+                case 0x0D: // tAreaN
+                    need(8);
+                    stack.push(`${formatLocRel(readUInt16LE(tokens, pos), readUInt16LE(tokens, pos + 4), cellContext)}:` +
+                        `${formatLocRel(readUInt16LE(tokens, pos + 2), readUInt16LE(tokens, pos + 6), cellContext)}`);
+                    pos += 8;
+                    break;
+                case 0x19: { // tNameX: ixti + external name index (1-based) + 2 unused bytes
+                    need(6);
+                    const ixti = readUInt16LE(tokens, pos);
+                    const idx = readUInt16LE(tokens, pos + 2);
+                    pos += 6;
+                    const xti = ctx && ctx.externSheets && ctx.externSheets[ixti];
+                    const book = xti && ctx.supbooks && ctx.supbooks[xti.supbook];
+                    let name;
+                    if (book && book.type === 'self') {
+                        name = ctx.names && ctx.names[idx - 1] && ctx.names[idx - 1].name;
+                    } else {
+                        name = book && book.externNames && book.externNames[idx - 1];
+                        if (name && book.type === 'external') {
+                            name = `[${book.name}]!${name}`;
+                        }
+                    }
+                    if (!name) {
+                        throw new PTGError(`unknown external name ${ixti}/${idx}`);
+                    }
+                    stack.push(name);
+                    break;
+                }
+                case 0x1A: { // tRef3d: ixti + RgceLoc (RgceLocRel inside shared formulas)
+                    need(6);
+                    const prefix = sheetPrefix(readUInt16LE(tokens, pos), ctx);
+                    const row = readUInt16LE(tokens, pos + 2);
+                    const col = readUInt16LE(tokens, pos + 4);
+                    pos += 6;
+                    const ref = cellContext ? formatLocRel(row, col, cellContext) : formatLoc(row, col);
+                    stack.push(prefix === null ? '#REF!' : prefix + ref);
+                    break;
+                }
+                case 0x1B: { // tArea3d
+                    need(10);
+                    const prefix = sheetPrefix(readUInt16LE(tokens, pos), ctx);
+                    const r1 = readUInt16LE(tokens, pos + 2);
+                    const r2 = readUInt16LE(tokens, pos + 4);
+                    const c1 = readUInt16LE(tokens, pos + 6);
+                    const c2 = readUInt16LE(tokens, pos + 8);
+                    pos += 10;
+                    const f = cellContext ? (r, c) => formatLocRel(r, c, cellContext) : formatLoc;
+                    stack.push(prefix === null ? '#REF!' : `${prefix}${f(r1, c1)}:${f(r2, c2)}`);
+                    break;
+                }
+                case 0x1C: { // tRefErr3d
+                    need(6);
+                    const prefix = sheetPrefix(readUInt16LE(tokens, pos), ctx);
+                    pos += 6;
+                    stack.push((prefix || '') + '#REF!');
+                    break;
+                }
+                case 0x1D: { // tAreaErr3d
+                    need(10);
+                    const prefix = sheetPrefix(readUInt16LE(tokens, pos), ctx);
+                    pos += 10;
+                    stack.push((prefix || '') + '#REF!');
+                    break;
+                }
+                default:
+                    throw new PTGError(`unsupported token 0x${rawToken.toString(16)}`);
             }
             continue;
         }
 
-        // Handle basic tokens (< 0x20) - no class bits
         switch (rawToken) {
-            // Binary operators
-            case PTG.tAdd:
-                const b = stack.pop() || '0';
-                const a = stack.pop() || '0';
-                stack.push(`${a}+${b}`);
-                break;
-
-            case PTG.tSub:
-                const sub2 = stack.pop() || '0';
-                const sub1 = stack.pop() || '0';
-                stack.push(`${sub1}-${sub2}`);
-                break;
-
-            case PTG.tMul:
-                const mul2 = stack.pop() || '0';
-                const mul1 = stack.pop() || '0';
-                stack.push(`${mul1}*${mul2}`);
-                break;
-
-            case PTG.tDiv:
-                const div2 = stack.pop() || '0';
-                const div1 = stack.pop() || '0';
-                stack.push(`${div1}/${div2}`);
-                break;
-
-            case PTG.tPower:
-                const pow2 = stack.pop() || '0';
-                const pow1 = stack.pop() || '0';
-                stack.push(`${pow1}^${pow2}`);
-                break;
-
-            case PTG.tConcat:
-                const str2 = stack.pop() || '""';
-                const str1 = stack.pop() || '""';
-                stack.push(`${str1}&${str2}`);
-                break;
-
-            // Comparison operators
-            case PTG.tLT:
-                const lt2 = stack.pop() || '0';
-                const lt1 = stack.pop() || '0';
-                stack.push(`${lt1}<${lt2}`);
-                break;
-
-            case PTG.tLE:
-                const le2 = stack.pop() || '0';
-                const le1 = stack.pop() || '0';
-                stack.push(`${le1}<=${le2}`);
-                break;
-
-            case PTG.tEQ:
-                const eq2 = stack.pop() || '0';
-                const eq1 = stack.pop() || '0';
-                stack.push(`${eq1}=${eq2}`);
-                break;
-
-            case PTG.tGE:
-                const ge2 = stack.pop() || '0';
-                const ge1 = stack.pop() || '0';
-                stack.push(`${ge1}>=${ge2}`);
-                break;
-
-            case PTG.tGT:
-                const gt2 = stack.pop() || '0';
-                const gt1 = stack.pop() || '0';
-                stack.push(`${gt1}>${gt2}`);
-                break;
-
-            case PTG.tNE:
-                const ne2 = stack.pop() || '0';
-                const ne1 = stack.pop() || '0';
-                stack.push(`${ne1}<>${ne2}`);
-                break;
-
-            // Range operators
-            case PTG.tRange:
-                const range2 = stack.pop() || 'A1';
-                const range1 = stack.pop() || 'A1';
-                stack.push(`${range1}:${range2}`);
-                break;
-
-            case PTG.tUnion:
-                const union2 = stack.pop() || 'A1';
-                const union1 = stack.pop() || 'A1';
-                stack.push(`${union1},${union2}`);
-                break;
-
-            // Unary operators
-            case PTG.tUplus:
-                const uplus = stack.pop() || '0';
-                stack.push(`+${uplus}`);
-                break;
-
-            case PTG.tUminus:
-                const uminus = stack.pop() || '0';
-                stack.push(`-${uminus}`);
-                break;
-
-            case PTG.tPercent:
-                const percent = stack.pop() || '0';
-                stack.push(`${percent}%`);
-                break;
-
-            case PTG.tParen:
-                const paren = stack.pop() || '0';
-                stack.push(`(${paren})`);
-                break;
-
-            // Operands
-            case PTG.tInt:
-                if (pos + 2 <= tokens.length) {
-                    const intVal = readUInt16LE(tokens, pos);
-                    stack.push(intVal.toString());
-                    pos += 2;
+            case 0x01: // tExp: shared / array formula pointer, resolved by the caller
+                throw new PTGError('unresolved shared or array formula (tExp)');
+            case 0x02: // tTbl: data table (TABLE record), not a formula a user typed
+                throw new PTGError('data table (tTbl)');
+            case 0x03: binary('+'); break;
+            case 0x04: binary('-'); break;
+            case 0x05: binary('*'); break;
+            case 0x06: binary('/'); break;
+            case 0x07: binary('^'); break;
+            case 0x08: binary('&'); break;
+            case 0x09: binary('<'); break;
+            case 0x0A: binary('<='); break;
+            case 0x0B: binary('='); break;
+            case 0x0C: binary('>='); break;
+            case 0x0D: binary('>'); break;
+            case 0x0E: binary('<>'); break;
+            case 0x0F: binary(' '); break; // intersection
+            case 0x10: binary(','); break; // union
+            case 0x11: binary(':'); break; // range
+            case 0x12: stack.push(`+${pop()}`); break;
+            case 0x13: stack.push(`-${pop()}`); break;
+            case 0x14: stack.push(`${pop()}%`); break;
+            case 0x15: stack.push(`(${pop()})`); break;
+            case 0x16: stack.push(''); break; // missing argument
+            case 0x17: { // tStr: ShortXLUnicodeString (cch, flags, chars)
+                need(2);
+                const strLen = tokens[pos];
+                const isUnicode = tokens[pos + 1] & 0x01;
+                pos += 2;
+                need(strLen * (isUnicode ? 2 : 1));
+                let str = '';
+                for (let i = 0; i < strLen; i++) {
+                    str += String.fromCharCode(isUnicode ? readUInt16LE(tokens, pos) : tokens[pos]);
+                    pos += isUnicode ? 2 : 1;
                 }
+                stack.push(`"${str.replace(/"/g, '""')}"`);
                 break;
-
-            case PTG.tNum:
-                if (pos + 8 <= tokens.length) {
-                    const numVal = readFloat64LE(tokens, pos);
-                    stack.push(numVal.toString());
-                    pos += 8;
+            }
+            case 0x19: { // tAttr
+                need(3);
+                const type = tokens[pos];
+                const data = readUInt16LE(tokens, pos + 1);
+                pos += 3;
+                if (type & 0x04) {
+                    // tAttrChoose: a jump table of data + 1 offsets follows
+                    need(2 * (data + 1));
+                    pos += 2 * (data + 1);
+                } else if (type & 0x10) {
+                    // tAttrSum: SUM with a single argument
+                    stack.push(`SUM(${pop()})`);
                 }
+                // tAttrVolatile / If / Goto / Space / SpaceVolatile / Baxcel: no effect on the text
                 break;
-
-            case PTG.tStr:
-                if (pos < tokens.length) {
-                    const strLen = tokens[pos];
-                    pos++;
-                    if (pos < tokens.length) {
-                        const isUnicode = tokens[pos] & 0x01;
-                        pos++;
-                        let str = '';
-                        if (isUnicode) {
-                            for (let i = 0; i < strLen && pos + 1 < tokens.length; i++, pos += 2) {
-                                str += String.fromCharCode(readUInt16LE(tokens, pos));
-                            }
-                        } else {
-                            for (let i = 0; i < strLen && pos < tokens.length; i++, pos++) {
-                                str += String.fromCharCode(tokens[pos]);
-                            }
-                        }
-                        stack.push(`"${str}"`);
-                    }
-                }
+            }
+            case 0x1C: // tErr
+                need(1);
+                stack.push(ERRORS[tokens[pos]] || '#N/A');
+                pos++;
                 break;
-
-            case PTG.tBool:
-                if (pos < tokens.length) {
-                    const boolVal = tokens[pos];
-                    stack.push(boolVal ? 'TRUE' : 'FALSE');
-                    pos++;
-                }
+            case 0x1D: // tBool
+                need(1);
+                stack.push(tokens[pos] ? 'TRUE' : 'FALSE');
+                pos++;
                 break;
-
-            case PTG.tAttr:
-                // Attribute token - control flow metadata (IF/CHOOSE/GOTO optimization)
-                // Structure: token(1) + type(1) + data(2) = 4 bytes total
-                // Skip the type and data bytes (3 bytes after the token)
-                if (pos + 2 < tokens.length) {
-                    pos += 3; // Skip type byte + 2 data bytes
-                }
-                // Don't push anything to stack - these are metadata only
+            case 0x1E: // tInt
+                need(2);
+                stack.push(readUInt16LE(tokens, pos).toString());
+                pos += 2;
                 break;
-
-            case PTG.tMissArg:
-                stack.push('');
+            case 0x1F: // tNum
+                need(8);
+                stack.push(readFloat64LE(tokens, pos).toString());
+                pos += 8;
                 break;
-
             default:
-                // Unknown token - skip it
-                // In a full implementation, we'd handle more token types
-                break;
+                throw new PTGError(`unsupported token 0x${rawToken.toString(16)}`);
         }
     }
 
-    // Return the final formula (or empty string if stack is empty)
-    return stack.length > 0 ? stack[stack.length - 1] : '';
+    if (stack.length !== 1) {
+        throw new PTGError(`malformed formula: ${stack.length} operands left`);
+    }
+    return stack[0];
 }
+
+export { BUILTIN_NAMES };

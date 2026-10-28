@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { decodePTG } from '../src/utils/ptg-decoder.js';
+import { decodePTG, PTGError } from '../src/utils/ptg-decoder.js';
 
 describe('PTG Decoder', () => {
     describe('Basic Operands', () => {
@@ -354,14 +354,26 @@ describe('PTG Decoder', () => {
 
     describe('Functions', () => {
         it('should decode function with fixed args (tFunc)', () => {
-            // PI function (index 19, no args in reality but decoder assumes 1)
+            // PI function (index 19) takes no arguments
             const tokens = new Uint8Array([
-                0x1E, 0x05, 0x00,  // int 5 (dummy arg for test)
                 0x21,              // tFunc
                 0x13, 0x00         // function index 19 (PI)
             ]);
-            const result = decodePTG(tokens);
-            expect(result).to.equal('PI(5)');
+            expect(decodePTG(tokens)).to.equal('PI()');
+        });
+
+        it('should not let zero-argument functions consume an operand (NOW, TODAY, TRUE)', () => {
+            // A1+NOW()-TODAY()*TRUE()
+            const tokens = new Uint8Array([
+                0x44, 0x00, 0x00, 0x00, 0xC0,  // tRef A1 (relative)
+                0x41, 0x4A, 0x00,              // tFunc NOW (74)
+                0x03,                          // add
+                0x41, 0xDD, 0x00,              // tFunc TODAY (221)
+                0x41, 0x22, 0x00,              // tFunc TRUE (34)
+                0x05,                          // mul
+                0x04                           // sub
+            ]);
+            expect(decodePTG(tokens)).to.equal('A1+NOW()-TODAY()*TRUE()');
         });
 
         it('should decode function with variable args (tFuncVar) - SUM', () => {
@@ -473,31 +485,26 @@ describe('PTG Decoder', () => {
             expect(result).to.equal('');
         });
 
-        it('should handle unknown token types gracefully', () => {
-            // Unknown token 0xFF followed by valid token
+        it('should reject unknown token types instead of guessing', () => {
             const tokens = new Uint8Array([
                 0xFF,              // unknown token
                 0x1E, 0x05, 0x00   // int 5
             ]);
-            const result = decodePTG(tokens);
-            expect(result).to.equal('5');
+            expect(() => decodePTG(tokens)).to.throw(PTGError);
         });
 
-        it('should handle truncated tokens gracefully', () => {
+        it('should reject truncated tokens', () => {
             // tInt token without data
-            const tokens = new Uint8Array([0x1E]);
-            const result = decodePTG(tokens);
-            expect(result).to.equal('');
+            expect(() => decodePTG(new Uint8Array([0x1E]))).to.throw(PTGError);
         });
 
-        it('should handle stack underflow with default values', () => {
+        it('should reject stack underflow', () => {
             // Addition operator without enough operands
             const tokens = new Uint8Array([
                 0x1E, 0x05, 0x00,  // int 5 (only one operand)
                 0x03               // add (needs two operands)
             ]);
-            const result = decodePTG(tokens);
-            expect(result).to.equal('0+5');
+            expect(() => decodePTG(tokens)).to.throw(PTGError);
         });
     });
 
@@ -632,6 +639,180 @@ describe('PTG Decoder', () => {
             ]);
             const result = decodePTG(tokens);
             expect(result).to.equal('A1');
+        });
+    });
+
+    // Workbook context as parseFormulaContext builds it from SUPBOOK / EXTERNSHEET / EXTERNNAME / NAME
+    const ctx = {
+        sheets: ['Sheet1', 'My Sheet', 'Data', "Bob's"],
+        supbooks: [
+            { type: 'self', externNames: [] },
+            { type: 'external', name: 'Book2.xls', sheetNames: ['Prices'], externNames: ['Rate'] },
+            { type: 'addin', externNames: ['MYUDF'] }
+        ],
+        externSheets: [
+            { supbook: 0, first: 1, last: 1 },           // 0: 'My Sheet'
+            { supbook: 0, first: 0, last: 2 },           // 1: Sheet1:Data
+            { supbook: 1, first: 0, last: 0 },           // 2: [Book2.xls]Prices
+            { supbook: 2, first: 0xFFFE, last: 0xFFFE }, // 3: add-in
+            { supbook: 0, first: 0xFFFF, last: 0xFFFF }, // 4: deleted sheet
+            { supbook: 0, first: 3, last: 3 }            // 5: Bob's
+        ],
+        names: [{ name: 'Total' }, { name: 'Print_Area' }]
+    };
+
+    describe('3-D References (tRef3d/tArea3d)', () => {
+        it('should prefix the sheet and quote names with spaces', () => {
+            // tRef3d ixti 0, A1 relative
+            const tokens = new Uint8Array([0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal("'My Sheet'!A1");
+        });
+
+        it('should escape apostrophes in sheet names', () => {
+            const tokens = new Uint8Array([0x5A, 0x05, 0x00, 0x00, 0x00, 0x00, 0xC0]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal("'Bob''s'!A1");
+        });
+
+        it('should decode a range across several sheets', () => {
+            // SUM(Sheet1:Data!A1:B2): tArea3d ixti 1, rows 0-1, cols 0-1 relative
+            const tokens = new Uint8Array([
+                0x3B, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xC0, 0x01, 0xC0,
+                0x22, 0x01, 0x04, 0x00
+            ]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal("SUM('Sheet1:Data'!A1:B2)");
+        });
+
+        it('should reference a sheet of an external workbook', () => {
+            // tRef3d ixti 2, $A$1
+            const tokens = new Uint8Array([0x5A, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal("'[Book2.xls]Prices'!$A$1");
+        });
+
+        it('should turn references to deleted sheets into #REF!', () => {
+            const tokens = new Uint8Array([0x5A, 0x04, 0x00, 0x00, 0x00, 0x00, 0xC0]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal('#REF!');
+        });
+
+        it('should decode tRefErr3d and tAreaErr3d', () => {
+            const ref = new Uint8Array([0x5C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            expect(decodePTG(ref, false, null, ctx)).to.equal("'My Sheet'!#REF!");
+            const area = new Uint8Array([0x5D, 0x00, 0x00, ...new Array(8).fill(0)]);
+            expect(decodePTG(area, false, null, ctx)).to.equal("'My Sheet'!#REF!");
+        });
+
+        it('should apply relative offsets inside shared formulas', () => {
+            // row offset -1, column offset 0, both relative; host cell C5
+            const tokens = new Uint8Array([0x5A, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0xC0]);
+            expect(decodePTG(tokens, false, { row: 4, col: 2 }, ctx)).to.equal("'My Sheet'!C4");
+        });
+
+        it('should reject unknown EXTERNSHEET entries and missing context', () => {
+            const tokens = new Uint8Array([0x5A, 0x09, 0x00, 0x00, 0x00, 0x00, 0xC0]);
+            expect(() => decodePTG(tokens, false, null, ctx)).to.throw(PTGError);
+            expect(() => decodePTG(tokens)).to.throw(PTGError);
+        });
+    });
+
+    describe('Defined and external names (tName/tNameX)', () => {
+        it('should decode a defined name', () => {
+            // SUM(Total)
+            const tokens = new Uint8Array([0x43, 0x01, 0x00, 0x00, 0x00, 0x22, 0x01, 0x04, 0x00]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal('SUM(Total)');
+        });
+
+        it('should reject an unknown defined name', () => {
+            const tokens = new Uint8Array([0x43, 0x05, 0x00, 0x00, 0x00]);
+            expect(() => decodePTG(tokens, false, null, ctx)).to.throw(PTGError);
+        });
+
+        it('should decode an external name of another workbook', () => {
+            // tNameX ixti 2, name 1
+            const tokens = new Uint8Array([0x59, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal('[Book2.xls]!Rate');
+        });
+
+        it('should resolve tNameX on the own workbook to a defined name', () => {
+            // tNameX ixti 0 (self), name 2
+            const tokens = new Uint8Array([0x59, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal('Print_Area');
+        });
+
+        it('should call add-in / user-defined functions by name', () => {
+            // MYUDF(A1): tNameX ixti 3 name 1, tRef A1, tFuncVar 2 args index 255
+            const tokens = new Uint8Array([
+                0x39, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+                0x44, 0x00, 0x00, 0x00, 0xC0,
+                0x42, 0x02, 0xFF, 0x00
+            ]);
+            expect(decodePTG(tokens, false, null, ctx)).to.equal('MYUDF(A1)');
+        });
+    });
+
+    describe('Array constants (tArray)', () => {
+        const f64 = (v) => {
+            const b = new Uint8Array(8);
+            new DataView(b.buffer).setFloat64(0, v, true);
+            return [...b];
+        };
+        // 2 columns x 2 rows: 1, "a""b"; TRUE, #DIV/0!
+        const extra = new Uint8Array([
+            0x01, 0x01, 0x00,
+            0x01, ...f64(1.5),
+            0x02, 0x03, 0x00, 0x00, 0x61, 0x22, 0x62,
+            0x04, 0x01, ...new Array(7).fill(0),
+            0x10, 0x07, ...new Array(7).fill(0)
+        ]);
+
+        it('should read the constants from RgbExtra', () => {
+            // SUM({...})
+            const tokens = new Uint8Array([0x60, ...new Array(7).fill(0), 0x22, 0x01, 0x04, 0x00]);
+            expect(decodePTG(tokens, false, null, { extra })).to.equal('SUM({1.5,"a""b";TRUE,#DIV/0!})');
+        });
+
+        it('should read several arrays in order', () => {
+            // {1}+{2}
+            const two = new Uint8Array([0x00, 0x00, 0x00, 0x01, ...f64(1), 0x00, 0x00, 0x00, 0x01, ...f64(2)]);
+            const tokens = new Uint8Array([0x40, ...new Array(7).fill(0), 0x40, ...new Array(7).fill(0), 0x03]);
+            expect(decodePTG(tokens, false, null, { extra: two })).to.equal('{1}+{2}');
+        });
+
+        it('should reject an array without RgbExtra or with an unknown constant type', () => {
+            const tokens = new Uint8Array([0x60, ...new Array(7).fill(0)]);
+            expect(() => decodePTG(tokens)).to.throw(PTGError);
+            expect(() => decodePTG(tokens, false, null, { extra: new Uint8Array([0, 0, 0, 0x09]) })).to.throw(PTGError);
+        });
+    });
+
+    describe('Memory tokens (tMem*)', () => {
+        it('should decode the sub-expression after tMemArea', () => {
+            // SUM(A1:B2) wrapped in tMemArea (4 unused bytes + cce)
+            const tokens = new Uint8Array([
+                0x26, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00,
+                0x25, 0x00, 0x00, 0x01, 0x00, 0x00, 0xC0, 0x01, 0xC0,
+                0x22, 0x01, 0x04, 0x00
+            ]);
+            expect(decodePTG(tokens)).to.equal('SUM(A1:B2)');
+        });
+
+        it('should decode the sub-expression after tMemFunc', () => {
+            const tokens = new Uint8Array([0x29, 0x05, 0x00, 0x44, 0x00, 0x00, 0x00, 0xC0]);
+            expect(decodePTG(tokens)).to.equal('A1');
+        });
+    });
+
+    describe('Unresolvable tokens', () => {
+        it('should reject tExp and tTbl (resolved by the caller)', () => {
+            expect(() => decodePTG(new Uint8Array([0x01, 0x00, 0x00, 0x00, 0x00]))).to.throw(PTGError);
+            expect(() => decodePTG(new Uint8Array([0x02, 0x00, 0x00, 0x00, 0x00]))).to.throw(PTGError);
+        });
+
+        it('should reject leftover operands', () => {
+            expect(() => decodePTG(new Uint8Array([0x1E, 0x01, 0x00, 0x1E, 0x02, 0x00]))).to.throw(PTGError);
+        });
+
+        it('should reject unknown function indices', () => {
+            expect(() => decodePTG(new Uint8Array([0x41, 0xFF, 0x7F]))).to.throw(PTGError);
+            expect(() => decodePTG(new Uint8Array([0x1E, 0x01, 0x00, 0x42, 0x01, 0xFF, 0x7F]))).to.throw(PTGError);
         });
     });
 });

@@ -109,12 +109,18 @@ function parseHeader(buffer) {
 }
 
 /**
- * Read a sector from the file
+ * Read a sector from the file. A truncated file (cut short by a download or a crashed writer) ends with a partial
+ * sector, returned zero-padded; a sector entirely past the end returns null and callers stop there.
  */
 function readSector(buffer, sectorId, sectorSize) {
     const offset = (sectorId + 1) * sectorSize;
+    if (offset >= buffer.length) {
+        return null;
+    }
     if (offset + sectorSize > buffer.length) {
-        throw new Error(`Sector ${sectorId} out of bounds`);
+        const padded = new Uint8Array(sectorSize);
+        padded.set(buffer.subarray(offset));
+        return padded;
     }
     return buffer.slice(offset, offset + sectorSize);
 }
@@ -135,6 +141,7 @@ function buildFAT(buffer, header) {
     let difatSector = firstDifatSector;
     for (let i = 0; i < difatSectors && difatSector < MAXREGSECT; i++) {
         const sector = readSector(buffer, difatSector, sectorSize);
+        if (!sector) break;
 
         // Each DIFAT sector contains FAT sector numbers
         for (let j = 0; j < entriesPerSector - 1; j++) {
@@ -151,6 +158,11 @@ function buildFAT(buffer, header) {
     // Read all FAT sectors
     for (const fatSectorNum of fatSectors) {
         const sector = readSector(buffer, fatSectorNum, sectorSize);
+        if (!sector) {
+            // FAT sector lost to truncation: its sectors read as free
+            for (let i = 0; i < entriesPerSector; i++) fat.push(FREESECT);
+            continue;
+        }
 
         for (let i = 0; i < entriesPerSector; i++) {
             fat.push(readUInt32LE(sector, i * 4));
@@ -180,6 +192,7 @@ function buildMiniFAT(buffer, header, fat) {
 
     while (sector < MAXREGSECT && count < miniFatSectors) {
         const sectorData = readSector(buffer, sector, sectorSize);
+        if (!sectorData) break;
 
         for (let i = 0; i < entriesPerSector; i++) {
             miniFat.push(readUInt32LE(sectorData, i * 4));
@@ -210,6 +223,7 @@ function readChain(buffer, startSector, fat, sectorSize, maxSize = Infinity) {
 
     while (sector < MAXREGSECT && totalSize < maxSize) {
         const sectorData = readSector(buffer, sector, sectorSize);
+        if (!sectorData) break; // truncated file: keep what precedes the end
         chunks.push(sectorData);
         totalSize += sectorSize;
         sector = fat[sector];

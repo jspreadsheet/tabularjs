@@ -3,6 +3,26 @@ import { parser } from '@lemonadejs/html-to-json';
 import { getColumnName, getCellNameFromCoords, getProp, getChildren, getTextContent } from '../utils/helpers.js';
 
 /**
+ * Whether a string is HTML markup rather than a file path
+ */
+export function isHTMLString(input) {
+    return typeof input === 'string' && input.trimStart().startsWith('<');
+}
+
+/**
+ * HTML source of the input: a DOM element, an HTML string, or a file (path, File, Blob, bytes)
+ */
+async function readHTML(input) {
+    if (typeof HTMLElement !== 'undefined' && input instanceof HTMLElement) {
+        return input.outerHTML;
+    }
+    if (isHTMLString(input)) {
+        return input;
+    }
+    return loadAsString(input);
+}
+
+/**
  * Recursively find all table nodes in the tree
  */
 function findAllTables(node) {
@@ -265,20 +285,7 @@ export async function parseHTMLTable(input, options = {}) {
     } = options;
 
     return parse(async (inp) => {
-        let fileContent;
-
-        // Check if input is a DOM element
-        if (typeof HTMLElement !== 'undefined' && inp instanceof HTMLElement) {
-            fileContent = inp.outerHTML;
-        }
-        // Check if input is an HTML table string
-        else if (typeof inp === 'string' && inp.trim().toLowerCase().startsWith('<table')) {
-            fileContent = inp;
-        }
-        // Otherwise, load as file
-        else {
-            fileContent = await loadAsString(inp);
-        }
+        const fileContent = await readHTML(inp);
 
         // Parse HTML to JSON
         const tree = parser(fileContent, { ignore: ['script', 'style'] });
@@ -317,20 +324,7 @@ export async function parseHTMLTable(input, options = {}) {
  */
 export async function parseAllHTMLTables(input, options = {}) {
     return parse(async (inp) => {
-        let fileContent;
-
-        // Check if input is a DOM element
-        if (typeof HTMLElement !== 'undefined' && inp instanceof HTMLElement) {
-            fileContent = inp.outerHTML;
-        }
-        // Check if input is an HTML table string
-        else if (typeof inp === 'string' && inp.trim().toLowerCase().startsWith('<table')) {
-            fileContent = inp;
-        }
-        // Otherwise, load as file
-        else {
-            fileContent = await loadAsString(inp);
-        }
+        const fileContent = await readHTML(inp);
 
         // Parse HTML to JSON
         const tree = parser(fileContent, { ignore: ['script', 'style'] });

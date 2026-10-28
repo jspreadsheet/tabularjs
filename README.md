@@ -12,7 +12,7 @@ A professional JavaScript library for converting spreadsheet files to JSON forma
 - **Universal JSON Output** - Structured data format for any JavaScript application
 - **Formula Preservation** - Maintains formulas where supported by the format
 - **Styling & Formatting** - Preserves merged cells, styles, and comments
-- **Zero Dependencies** - No xlsx, no SheetJS - pure JavaScript implementation
+- **No Spreadsheet Library Dependencies** - No xlsx, no SheetJS - pure JavaScript parsers (only JSZip and an HTML table parser at runtime)
 - **Framework Agnostic** - Works with Vanilla JS, React, Vue, Angular, and Node.js
 
 ## Supported Formats

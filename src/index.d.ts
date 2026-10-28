@@ -63,7 +63,7 @@ export interface Worksheet {
     rows?: Record<number, Row>;
     /** Cell-specific properties (keyed by cell address like "A1") */
     cells?: Record<string, Cell>;
-    /** CSS styles for cells (keyed by cell address) */
+    /** Style of each cell (keyed by cell address): an index into ParseResult.style */
     style?: Record<string, string | number>;
     /** Merged cells (keyed by cell address, value is [colspan, rowspan]) */
     mergeCells?: Record<string, [number, number]>;
@@ -71,6 +71,12 @@ export interface Worksheet {
     comments?: Record<string, string>;
     /** Minimum dimensions [columns, rows] */
     minDimensions?: [number, number];
+    /** Sheet visibility (omitted when visible) */
+    worksheetState?: 'hidden' | 'veryHidden';
+    /** false when the sheet hides its gridlines */
+    gridline?: boolean;
+    /** Images, charts and shapes (XLSX, ODS) */
+    media?: any[];
     /** Format-specific metadata */
     meta?: Record<string, any>;
 }
@@ -83,33 +89,42 @@ export interface ParseResult {
     worksheets: Worksheet[];
     /** Global styles (array of CSS strings) */
     style?: string[];
+    /** Named ranges (name -> reference, e.g. "Sheet1!$A$1:$B$10") */
+    definedNames?: Record<string, string>;
 }
 
 /**
  * Options for parsing files
  */
 export interface ParseOptions {
-    /** Delimiter for CSV/TSV files (default: "," for CSV, "\t" for TSV) */
+    /** Force a format (e.g. "xlsx" or ".xlsx") instead of detecting it from the file name or content */
+    extension?: string;
+    /** Delimiter for CSV and TXT files (default: "," for CSV, "\t" for TXT; TSV always uses tabs) */
     delimiter?: string;
-    /** File encoding (default: auto-detect) */
+    /** Text encoding for CSV, TSV, TXT and DIF (default: "utf-8" for CSV/TSV/TXT, auto-detected for DIF) */
     encoding?: string;
-    /** Table index for HTML files (default: 0) */
+    /** HTML: return only this table (0-based); by default every <table> becomes a worksheet */
     tableIndex?: number;
     /** Use first row as header for HTML tables (default: true) */
     firstRowAsHeader?: boolean;
+    /** Called with the result when parsing succeeds (the promise also resolves with it) */
+    onload?: (result: ParseResult) => void;
+    /** Called with the error when parsing fails (the promise also rejects with it) */
+    onerror?: (error: Error) => void;
     /** Any other format-specific options */
     [key: string]: any;
 }
 
 /**
- * Input file type - can be a file path (Node.js), File object (Browser), HTML string, or DOM element
+ * Input file type - can be a file path (Node.js), File object (Browser), raw bytes (Uint8Array, ArrayBuffer or
+ * Node Buffer), HTML string, or DOM element
  */
-export type FileInput = string | File | Blob | HTMLElement;
+export type FileInput = string | File | Blob | Uint8Array | ArrayBuffer | HTMLElement;
 
 /**
  * Parse a spreadsheet file and convert it to JSON format
  *
- * @param file - File path (Node.js), File object (Browser), Blob, HTML string, or DOM element
+ * @param file - File path (Node.js), File object (Browser), Blob, raw bytes, HTML string, or DOM element
  * @param options - Parsing options
  * @returns Promise resolving to parsed data in Jspreadsheet Pro format
  *

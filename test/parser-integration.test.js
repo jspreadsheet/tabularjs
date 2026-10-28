@@ -441,4 +441,81 @@ describe('Parser Integration Tests', () => {
             }
         });
     });
+
+    describe('HTML input', () => {
+        const page = `<!DOCTYPE html><html><body>
+            <h1>Prices</h1>
+            <table><tr><th>Item</th><th>Price</th></tr><tr><td>Apple</td><td>1.5</td></tr></table>
+            <table><tr><th>City</th></tr><tr><td>Lisbon</td></tr><tr><td>Porto</td></tr></table>
+        </body></html>`;
+
+        it('should accept an HTML string instead of a file path', async () => {
+            const result = await parser('<table><tr><th>A</th></tr><tr><td>1</td></tr></table>');
+            expect(result.worksheets[0].data).to.deep.equal([['1']]);
+        });
+
+        it('should accept a full page as a string, with leading whitespace', async () => {
+            const result = await parser('\n  ' + page);
+            expect(result.worksheets).to.have.lengthOf(2);
+        });
+
+        it('should return one worksheet per table', async () => {
+            const result = await parser(page);
+            expect(result.worksheets.map((w) => w.worksheetName)).to.deep.equal(['Table1', 'Table2']);
+            expect(result.worksheets[0].columns.map((c) => c.title)).to.deep.equal(['Item', 'Price']);
+            expect(result.worksheets[0].data).to.deep.equal([['Apple', '1.5']]);
+            expect(result.worksheets[1].data).to.deep.equal([['Lisbon'], ['Porto']]);
+        });
+
+        it('should return only the table picked by tableIndex', async () => {
+            const result = await parser(page, { tableIndex: 1 });
+            expect(result.worksheets).to.have.lengthOf(1);
+            expect(result.worksheets[0].data).to.deep.equal([['Lisbon'], ['Porto']]);
+        });
+
+        it('should return every table from HTML bytes', async () => {
+            const bytes = new TextEncoder().encode(page);
+            expect((await parser(bytes)).worksheets).to.have.lengthOf(2);
+            expect((await parser(bytes.buffer, { extension: 'html', tableIndex: 0 })).worksheets[0].data)
+                .to.deep.equal([['Apple', '1.5']]);
+        });
+
+        it('should report a page without tables', async () => {
+            try {
+                await parser('<html><body><p>nothing</p></body></html>');
+                expect.fail('should have thrown');
+            } catch (error) {
+                expect(error.message).to.include('No table elements found');
+            }
+        });
+
+        it('should still treat other strings as file paths', async () => {
+            try {
+                await parser('missing-file.csv');
+                expect.fail('should have thrown');
+            } catch (error) {
+                expect(error.message).to.not.include('No table elements');
+            }
+        });
+    });
+
+    describe('Text options', () => {
+        it('should decode CSV with the given encoding', async () => {
+            const latin1 = Uint8Array.from([0x43, 0x61, 0x66, 0xE9, 0x2C, 0x31, 0x0A]); // "Café,1" in latin1
+            const result = await parser(latin1, { extension: 'csv', encoding: 'latin1' });
+            expect(result.worksheets[0].data[0]).to.deep.equal(['Café', '1']);
+        });
+
+        it('should read CSV as UTF-8 by default', async () => {
+            const utf8 = new TextEncoder().encode('Café,1\n');
+            const result = await parser(utf8, { extension: 'csv' });
+            expect(result.worksheets[0].data[0]).to.deep.equal(['Café', '1']);
+        });
+
+        it('should split TXT on tabs unless a delimiter is given', async () => {
+            const bytes = new TextEncoder().encode('a;b\tc\n');
+            expect((await parser(bytes, { extension: 'txt' })).worksheets[0].data[0]).to.deep.equal(['a;b', 'c']);
+            expect((await parser(bytes, { extension: 'txt', delimiter: ';' })).worksheets[0].data[0]).to.deep.equal(['a', 'b\tc']);
+        });
+    });
 });

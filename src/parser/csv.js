@@ -136,6 +136,7 @@ export function parseCSVString(content, delimiter = ',') {
  * @param {string|File|Uint8Array} input - File path (Node.js), File object (Browser), or buffer
  * @param {Object} options - Parser options
  * @param {string} options.delimiter - Column delimiter (default: ',')
+ * @param {string} options.encoding - Character encoding (default: 'utf-8'), any TextDecoder label or iconv-lite codepage
  * @param {Function} options.onload - Callback when parsing completes
  * @param {Function} options.onerror - Callback when parsing fails
  * @returns {Promise<object>} Jspreadsheet Pro format
@@ -146,7 +147,7 @@ export async function parseCSVFile(input, options = {}) {
         const delimiter = typeof options === 'string' ? options : (opts.delimiter || ',');
 
         // Load and parse directly
-        const content = await loadAsString(inp);
+        const content = await loadAsString(inp, opts.encoding);
         return parseCSVString(content, delimiter);
     }, input, typeof options === 'string' ? {} : options);
 }
