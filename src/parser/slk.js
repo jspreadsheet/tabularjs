@@ -184,7 +184,7 @@ function deduplicateBorders(cellStyles, maxRow, maxCol) {
  * Parse SLK from string content
  */
 export function parseSLKString(fileContent) {
-    const lines = fileContent.split(/\r?\n/);
+    const lines = fileContent.split(/\r\n|\r|\n/); // CR-only line endings come from classic Mac Excel
 
     const cells = {};
     const cellStyles = {}; // Cell address -> CSS style

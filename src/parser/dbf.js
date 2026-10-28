@@ -16,6 +16,49 @@ import { readUInt8, readUInt16LE, readUInt32LE, readFloat64LE } from '../utils/h
  * - Merged cells (database concept)
  */
 
+// Language driver ID (header byte 29) -> codepage of the text fields, per the dBase / FoxPro tables
+const LANGUAGE_DRIVERS = {
+    0x01: 'cp437', 0x02: 'cp850', 0x03: 'cp1252', 0x04: 'macintosh', 0x08: 'cp865', 0x09: 'cp437',
+    0x0A: 'cp850', 0x0B: 'cp437', 0x0D: 'cp437', 0x0E: 'cp850', 0x0F: 'cp437', 0x10: 'cp850',
+    0x11: 'cp437', 0x12: 'cp850', 0x13: 'cp932', 0x14: 'cp850', 0x15: 'cp437', 0x16: 'cp850',
+    0x17: 'cp865', 0x18: 'cp437', 0x19: 'cp437', 0x1A: 'cp850', 0x1B: 'cp437', 0x1C: 'cp863',
+    0x1D: 'cp850', 0x1F: 'cp852', 0x22: 'cp852', 0x23: 'cp852', 0x24: 'cp860', 0x25: 'cp850',
+    0x26: 'cp866', 0x37: 'cp850', 0x40: 'cp852', 0x4D: 'cp936', 0x4E: 'cp949', 0x4F: 'cp950',
+    0x50: 'cp874', 0x57: 'cp1252', 0x58: 'cp1252', 0x59: 'cp1252', 0x64: 'cp852', 0x65: 'cp866',
+    0x66: 'cp865', 0x67: 'cp861', 0x6A: 'cp737', 0x6B: 'cp857', 0x78: 'cp950', 0x79: 'cp949',
+    0x7A: 'cp936', 0x7B: 'cp932', 0x7C: 'cp874', 0x86: 'cp737', 0x87: 'cp852', 0x88: 'cp857',
+    0xC8: 'cp1250', 0xC9: 'cp1251', 0xCA: 'cp1254', 0xCB: 'cp1253', 0xCC: 'cp1257'
+};
+
+// Codepages that TextDecoder knows under a WHATWG label; the DOS ones (cp437, cp850...) need iconv-lite
+const WHATWG_LABELS = {
+    cp1250: 'windows-1250', cp1251: 'windows-1251', cp1252: 'windows-1252', cp1253: 'windows-1253',
+    cp1254: 'windows-1254', cp1257: 'windows-1257', cp866: 'ibm866', cp874: 'windows-874',
+    cp932: 'shift_jis', cp936: 'gbk', cp949: 'euc-kr', cp950: 'big5'
+};
+
+/**
+ * Text decoder for an encoding name, or null when neither TextDecoder nor iconv-lite (Node.js) knows it
+ */
+async function getDecoder(encoding) {
+    try {
+        const decoder = new TextDecoder(WHATWG_LABELS[encoding] || encoding);
+        return (bytes) => decoder.decode(bytes);
+    } catch (e) {
+        // Not a WHATWG label: try iconv-lite below
+    }
+    try {
+        const module = await import('iconv-lite');
+        const iconv = module.default || module;
+        if (iconv.encodingExists(encoding)) {
+            return (bytes) => iconv.decode(Buffer.from(bytes), encoding);
+        }
+    } catch (e) {
+        // iconv-lite is optional (and absent from browser bundles)
+    }
+    return null;
+}
+
 // DBF version constants
 const DBF_VERSION = {
     0x02: 'FoxBASE',
@@ -169,9 +212,10 @@ function parseFieldDescriptor(buffer, offset) {
 /**
  * Parse a record value based on field type
  */
-function parseFieldValue(buffer, offset, field) {
+function parseFieldValue(buffer, offset, field, decode) {
     const bytes = buffer.slice(offset, offset + field.length);
-    const rawValue = String.fromCharCode(...bytes).trim();
+    // Character fields carry text in the file's codepage; the other types are ASCII digits or binary
+    const rawValue = (field.type === 'C' && decode ? decode(bytes) : String.fromCharCode(...bytes)).trim();
 
     if (!rawValue || rawValue === '') {
         return null;
@@ -267,7 +311,7 @@ function parseFieldValue(buffer, offset, field) {
  * @param {Uint8Array} buffer - DBF file buffer
  * @returns {object} Jspreadsheet Pro format
  */
-export function parseDBFBuffer(buffer) {
+export function parseDBFBuffer(buffer, decode = null) {
     // Ensure buffer is Uint8Array
     if (!(buffer instanceof Uint8Array)) {
         buffer = new Uint8Array(buffer);
@@ -300,7 +344,13 @@ export function parseDBFBuffer(buffer) {
     const data = [];
     const deletedRecords = [];
 
-    for (let i = 0; i < header.recordCount; i++) {
+    // The record count comes from an untrusted header: never read more records than the file holds
+    const available = header.recordLength > 0
+        ? Math.max(0, Math.floor((buffer.length - header.headerLength) / header.recordLength))
+        : 0;
+    const recordCount = Math.min(header.recordCount, available);
+
+    for (let i = 0; i < recordCount; i++) {
         // First byte of record: 0x20 = valid, 0x2A = deleted
         const deletionFlag = buffer[offset];
         offset++;
@@ -308,7 +358,7 @@ export function parseDBFBuffer(buffer) {
         const record = [];
 
         for (const field of fields) {
-            const value = parseFieldValue(buffer, offset, field);
+            const value = parseFieldValue(buffer, offset, field, decode);
             record.push(value);
             offset += field.length;
         }
@@ -402,6 +452,8 @@ export function parseDBFBuffer(buffer) {
  * Parse DBF file - works in both Browser and Node.js
  * @param {string|File|Uint8Array} input - File path (Node.js), File object (Browser), or buffer
  * @param {Object} options - Parser options
+ * @param {string} options.encoding - Encoding of the text fields (default: the codepage declared by the file's
+ *     language driver byte, else latin1)
  * @param {Function} options.onload - Callback when parsing completes
  * @param {Function} options.onerror - Callback when parsing fails
  * @returns {Promise<object>} Jspreadsheet Pro format
@@ -409,6 +461,11 @@ export function parseDBFBuffer(buffer) {
 export async function parseDBF(input, options = {}) {
     return parse(async (inp) => {
         const buffer = await loadAsBuffer(inp);
-        return parseDBFBuffer(buffer);
+        const encoding = options.encoding || (buffer.length > 29 ? LANGUAGE_DRIVERS[buffer[29]] : undefined);
+        const decode = encoding ? await getDecoder(encoding) : null;
+        if (options.encoding && !decode) {
+            throw new Error(`Unknown encoding '${options.encoding}'`);
+        }
+        return parseDBFBuffer(buffer, decode);
     }, input, options);
 }

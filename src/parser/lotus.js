@@ -253,14 +253,12 @@ function parseCells(records) {
             });
         }
 
-        // Formula cell
+        // Formula cell: only the calculated value is kept; the formula tokens (bytes 15+) are not decoded
         if (record.type === LOTUS_RECORDS.FORMULA) {
             const format = readUInt8(data, 0);
             const col = readUInt16LE(data, 1);
             const row = readUInt16LE(data, 3);
             const value = readFloat64LE(data, 5);
-            const formulaLen = readUInt16LE(data, 13);
-            const formulaData = data.slice(15, 15 + formulaLen);
 
             cells.push({
                 row,
@@ -268,14 +266,14 @@ function parseCells(records) {
                 sheet: currentSheet,
                 value,
                 type: 'formula',
-                formula: Array.from(formulaData),
                 format: parseFormatting(format)
             });
         }
 
         // String result from formula
         if (record.type === LOTUS_RECORDS.STRING) {
-            const value = String.fromCharCode(...data).replace(/\0/g, '');
+            // format (1), column (2), row (2), then the null-terminated string
+            const value = String.fromCharCode(...data.slice(5)).replace(/\0/g, '');
             // Update the last formula cell's value
             if (cells.length > 0 && cells[cells.length - 1].type === 'formula') {
                 cells[cells.length - 1].value = value;
@@ -340,11 +338,6 @@ function convertToJspreadsheet(cells, columns, sheetNames) {
         sheetCells.forEach(cell => {
             const address = getCellNameFromCoords(cell.col, cell.row);
             data[cell.row][cell.col] = cell.value;
-
-            // Add formula if present
-            if (cell.type === 'formula' && cell.formula) {
-                cellsObj[address] = { formula: cell.formula };
-            }
 
             // Add style if present
             const cssStyle = formatToCSS(cell.format, cell.alignment);

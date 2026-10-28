@@ -499,6 +499,99 @@ describe('Parser Integration Tests', () => {
         });
     });
 
+    describe('Lotus formulas', () => {
+        const u16 = (n) => [n & 0xFF, n >> 8];
+        const f64 = (v) => {
+            const b = new Uint8Array(8);
+            new DataView(b.buffer).setFloat64(0, v, true);
+            return [...b];
+        };
+        const rec = (type, data) => [...u16(type), ...u16(data.length), ...data];
+        const tokens = [0x01, 0x00, 0x80, 0x00, 0x80, 0x05, 0x02, 0x00, 0x0B, 0x03]; // A1*2 (not decoded)
+        const wk1 = Uint8Array.from([
+            ...rec(0x00, u16(0x0406)),                                                          // BOF
+            ...rec(0x0E, [0xFF, ...u16(0), ...u16(0), ...f64(21)]),                             // A1 = 21
+            ...rec(0x10, [0xFF, ...u16(1), ...u16(0), ...f64(42), ...u16(tokens.length), ...tokens]), // B1 = A1*2
+            ...rec(0x10, [0xFF, ...u16(2), ...u16(0), ...f64(0), ...u16(tokens.length), ...tokens]),  // C1: string result
+            ...rec(0x33, [0xFF, ...u16(2), ...u16(0), ...Array.from('ok', (c) => c.charCodeAt(0)), 0]),
+            ...rec(0x01, [])                                                                    // EOF
+        ]);
+
+        it('should return the calculated values of formula cells', async () => {
+            const result = await parser(wk1, { extension: 'wk1' });
+            expect(result.worksheets[0].data[0]).to.deep.equal([21, 42, 'ok']);
+        });
+
+        it('should not expose undecoded formula tokens', async () => {
+            const result = await parser(wk1, { extension: 'wk1' });
+            expect(result.worksheets[0].cells).to.deep.equal({});
+        });
+    });
+
+    describe('Legacy formats (regressions from real-world files)', () => {
+        /** dBase III file with one character field of the given width */
+        const dbf = ({ ldid = 0, declared, width = 8, rows = [] }) => {
+            const header = new Uint8Array(32);
+            const view = new DataView(header.buffer);
+            header[0] = 0x03;
+            view.setUint32(4, declared ?? rows.length, true);
+            view.setUint16(8, 32 + 32 + 1, true);
+            view.setUint16(10, 1 + width, true);
+            header[29] = ldid;
+            const field = new Uint8Array(32);
+            field.set([0x4E, 0x41, 0x4D, 0x45]); // NAME
+            field[11] = 0x43; // 'C'
+            field[16] = width;
+            const records = rows.flatMap((bytes) => [0x20, ...bytes, ...new Array(width - bytes.length).fill(0x20)]);
+            return Uint8Array.from([...header, ...field, 0x0D, ...records, 0x1A]);
+        };
+        const russian = [0xD0, 0xF3, 0xF1, 0xF1, 0xEA, 0xE8, 0xE9]; // "Русский" in windows-1251
+
+        it('should decode DBF text with the codepage of the language driver byte', async () => {
+            const result = await parser(dbf({ ldid: 0xC9, rows: [russian] }), { extension: 'dbf' });
+            expect(result.worksheets[0].data[0][0]).to.equal('Русский');
+        });
+
+        it('should let options.encoding override the DBF codepage', async () => {
+            const result = await parser(dbf({ ldid: 0x65, rows: [russian] }), { extension: 'dbf', encoding: 'windows-1251' });
+            expect(result.worksheets[0].data[0][0]).to.equal('Русский');
+        });
+
+        it('should reject an unknown DBF encoding', async () => {
+            try {
+                await parser(dbf({ rows: [russian] }), { extension: 'dbf', encoding: 'no-such-encoding' });
+                expect.fail('should have thrown');
+            } catch (error) {
+                expect(error.message).to.include('Unknown encoding');
+            }
+        });
+
+        it('should not trust a DBF record count larger than the file', async () => {
+            // A 41 KB file in the LibreOffice corpus declares 660,481 records of 180 fields
+            const result = await parser(dbf({ declared: 5_000_000, rows: [[0x41], [0x42]] }), { extension: 'dbf' });
+            expect(result.worksheets[0].data).to.deep.equal([['A'], ['B']]);
+        });
+
+        it('should read SYLK files with CR-only line endings', async () => {
+            const slk = new TextEncoder().encode('ID;PWXL;N;E\rC;Y1;X1;K"Name"\rC;Y2;X1;K42\rE\r');
+            const result = await parser(slk, { extension: 'slk' });
+            expect(result.worksheets[0].data).to.deep.equal([['Name'], [42]]);
+        });
+
+        it('should not write to the console while parsing DIF', async () => {
+            const dif = new TextEncoder().encode('TABLE\n0,1\n""\nVECTORS\n0,1\n""\nTUPLES\n0,1\n""\nDATA\n0,0\n""\n-1,0\nBOT\n0,7\nV\n-1,0\nEOD\n');
+            const log = console.log;
+            let calls = 0;
+            console.log = () => { calls++; };
+            try {
+                await parser(dif, { extension: 'dif' });
+            } finally {
+                console.log = log;
+            }
+            expect(calls).to.equal(0);
+        });
+    });
+
     describe('Text options', () => {
         it('should decode CSV with the given encoding', async () => {
             const latin1 = Uint8Array.from([0x43, 0x61, 0x66, 0xE9, 0x2C, 0x31, 0x0A]); // "Café,1" in latin1

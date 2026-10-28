@@ -242,7 +242,6 @@ async function parseNumbersFromZip(zip) {
         }
     });
 
-    console.log(`Numbers: Found ${iwaFiles.length} IWA files`);
 
     // Parse each IWA file
     const allMessages = [];
@@ -251,17 +250,14 @@ async function parseNumbersFromZip(zip) {
             const buffer = await readZipEntry(file, 'nodebuffer');
             const messages = parseIWA(buffer);
             allMessages.push(...messages);
-            console.log(`Numbers: Parsed ${messages.length} messages from ${path}`);
         } catch (e) {
             console.warn(`Numbers: Failed to parse ${path}:`, e.message);
         }
     }
 
-    console.log(`Numbers: Total messages parsed: ${allMessages.length}`);
 
     // Extract cell data
     const cellData = extractCellData(allMessages);
-    console.log(`Numbers: Extracted ${cellData.strings.length} strings, ${cellData.numbers.length} numbers`);
 
     // Build worksheet
     const data = buildWorksheetData(cellData);

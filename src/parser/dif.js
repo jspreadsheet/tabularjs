@@ -366,7 +366,6 @@ export async function parseDIF(input, options = {}) {
                     const controlCharCount = (testContent.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
                     score -= controlCharCount * 10;
 
-                    console.log(`DIF: Tried encoding ${enc}, score: ${score}`);
 
                     if (score > bestScore) {
                         bestScore = score;
@@ -378,11 +377,9 @@ export async function parseDIF(input, options = {}) {
                     if (replacementCount === 0 && score > 50) {
                         encoding = enc;
                         content = testContent;
-                        console.log(`DIF: Successfully parsed with encoding: ${encoding} (score: ${score})`);
                         break;
                     }
                 } catch (e) {
-                    console.log(`DIF: Failed with encoding ${enc}:`, e.message);
                     continue;
                 }
             }
@@ -391,19 +388,16 @@ export async function parseDIF(input, options = {}) {
             if (!content && bestContent) {
                 encoding = bestEncoding;
                 content = bestContent;
-                console.log(`DIF: Using best encoding: ${encoding} (score: ${bestScore})`);
             }
 
             // If all failed, use first attempt (latin1)
             if (!content) {
                 encoding = 'latin1';
                 content = await loadAsString(inp, encoding);
-                console.log(`DIF: Using fallback encoding: ${encoding}`);
             }
         } else {
             // Use specified encoding
             content = await loadAsString(inp, encoding);
-            console.log(`DIF: Using specified encoding: ${encoding}`);
         }
 
         return parseDIFString(content);

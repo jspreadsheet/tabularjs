@@ -208,10 +208,10 @@ export default {
 | XML 2003    | ✅ Full          | Formula attribute                           |
 | SYLK        | ✅ Full          | E parameter                                 |
 | HTML        | ✅ Partial       | Via `data-formula` attribute                |
-| CSV/TSV/TXT | ❌ No            | Data-only format                            |
-| DIF         | ❌ No            | Data-only format (stores calculated values) |
-| DBF         | ❌ No            | Database format (stores calculated values)  |
-| Lotus       | ❌ Limited       | Complex token format                        |
+| CSV/TSV/TXT | ➖ As text       | No formula syntax; a cell written as `=SUM(A1:A2)` is kept as that text |
+| DIF         | ❌ No            | The format stores calculated values only    |
+| DBF         | ❌ No            | Database format, no formulas                |
+| Lotus       | ❌ No            | Calculated values only; formula tokens are not decoded |
 
 ## Scope & Limitations
 

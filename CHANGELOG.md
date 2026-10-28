@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.1] - 2026-10-28
+
+### Fixed
+- **Lotus**: formula cells exposed the raw, undecoded token bytes as `cells[address].formula` (an array of numbers); only the calculated value is returned now, in `data`
+- **Lotus**: string results of formulas included the record header bytes (`"ÿ\u0002ok"` instead of `"ok"`)
+- **DBF**: the record count from the header was trusted: a crafted 41 KB file allocated 118 million cells; records are now limited to what the file holds
+- **DBF**: text fields ignored the file's codepage (Cyrillic, Central European, CJK... came out garbled); they are decoded with the codepage of the language driver byte, or `options.encoding` when given
+- **SYLK**: files with CR-only line endings (classic Mac Excel) parsed as empty
+- **DIF / Numbers**: removed debug `console.log` output during parsing
+- Found by running the LibreOffice import test corpus (`sc/qa/unit/data`: 123, wks, dif, dbf, slk); 6 new regression tests (433 total)
+
+### Changed
+- README formula table: CSV/TSV/TXT keep `=...` cells as text, Lotus returns calculated values only
+
 ## [2.1.0] - 2026-10-28
 
 ### Added

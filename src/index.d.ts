@@ -101,7 +101,7 @@ export interface ParseOptions {
     extension?: string;
     /** Delimiter for CSV and TXT files (default: "," for CSV, "\t" for TXT; TSV always uses tabs) */
     delimiter?: string;
-    /** Text encoding for CSV, TSV, TXT and DIF (default: "utf-8" for CSV/TSV/TXT, auto-detected for DIF) */
+    /** Text encoding for CSV, TSV, TXT, DIF and DBF (default: "utf-8" for CSV/TSV/TXT, auto-detected for DIF, the file's codepage for DBF) */
     encoding?: string;
     /** HTML: return only this table (0-based); by default every <table> becomes a worksheet */
     tableIndex?: number;
