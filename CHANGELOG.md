@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- TypeScript definitions: the `encoding` option lists SYLK, which honours it since 2.2.0
+
 ## [2.2.0] - 2026-10-29
 
 ### Added
