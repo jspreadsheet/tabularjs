@@ -41,34 +41,98 @@ function findAllTables(node) {
     return tables;
 }
 
+// Named HTML entities: the XML ones, all of Latin-1 (U+00A0..U+00FF), Greek letters and common typography/math.
+// &nbsp; is decoded to a regular space (U+0020) so spreadsheet values never carry U+00A0.
+const htmlEntities = (() => {
+    const map = { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'", nbsp: ' ' };
+    const latin1 = ('iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy reg macr deg plusmn sup2 sup3 ' +
+        'acute micro para middot cedil sup1 ordm raquo frac14 frac12 frac34 iquest Agrave Aacute Acirc Atilde Auml Aring ' +
+        'AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde Ograve Oacute Ocirc Otilde Ouml times ' +
+        'Oslash Ugrave Uacute Ucirc Uuml Yacute THORN szlig agrave aacute acirc atilde auml aring aelig ccedil egrave ' +
+        'eacute ecirc euml igrave iacute icirc iuml eth ntilde ograve oacute ocirc otilde ouml divide oslash ugrave ' +
+        'uacute ucirc uuml yacute thorn yuml').split(' ');
+    latin1.forEach((name, i) => { map[name] = String.fromCharCode(0xA1 + i); });
+    const greek = 'Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa Lambda Mu Nu Xi Omicron Pi Rho - Sigma Tau Upsilon Phi Chi Psi Omega'.split(' ');
+    greek.forEach((name, i) => {
+        if (name === '-') return;
+        map[name] = String.fromCharCode(0x391 + i);
+        map[name.toLowerCase()] = String.fromCharCode(0x3B1 + i);
+    });
+    map.sigmaf = 'ς';
+    Object.assign(map, {
+        OElig: 'Œ', oelig: 'œ', Scaron: 'Š', scaron: 'š', Yuml: 'Ÿ', fnof: 'ƒ',
+        circ: 'ˆ', tilde: '˜', ensp: ' ', emsp: ' ', thinsp: ' ', zwnj: '‌',
+        zwj: '‍', lrm: '‎', rlm: '‏', ndash: '–', mdash: '—', lsquo: '‘',
+        rsquo: '’', sbquo: '‚', ldquo: '“', rdquo: '”', bdquo: '„', dagger: '†',
+        Dagger: '‡', bull: '•', hellip: '…', permil: '‰', prime: '′', Prime: '″',
+        lsaquo: '‹', rsaquo: '›', oline: '‾', frasl: '⁄', euro: '€', trade: '™',
+        larr: '←', uarr: '↑', rarr: '→', darr: '↓', harr: '↔', minus: '−',
+        lowast: '∗', radic: '√', prop: '∝', infin: '∞', asymp: '≈', ne: '≠',
+        equiv: '≡', le: '≤', ge: '≥', sum: '∑', prod: '∏', part: '∂',
+        forall: '∀', exist: '∃', isin: '∈', notin: '∉', cap: '∩', cup: '∪',
+        int: '∫', loz: '◊', spades: '♠', clubs: '♣', hearts: '♥', diams: '♦'
+    });
+    return map;
+})();
+
+// Windows-1252 code points that HTML maps numeric references &#128;..&#159; to
+const cp1252 = {
+    0x80: 0x20AC, 0x82: 0x201A, 0x83: 0x0192, 0x84: 0x201E, 0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021,
+    0x88: 0x02C6, 0x89: 0x2030, 0x8A: 0x0160, 0x8B: 0x2039, 0x8C: 0x0152, 0x8E: 0x017D, 0x91: 0x2018,
+    0x92: 0x2019, 0x93: 0x201C, 0x94: 0x201D, 0x95: 0x2022, 0x96: 0x2013, 0x97: 0x2014, 0x98: 0x02DC,
+    0x99: 0x2122, 0x9A: 0x0161, 0x9B: 0x203A, 0x9C: 0x0153, 0x9E: 0x017E, 0x9F: 0x0178
+};
+
+/**
+ * Decode HTML character references (named, decimal and hex) in a single pass.
+ * The html-to-json parser keeps text and attribute values exactly as written.
+ * Unknown named entities are left untouched.
+ */
+function decodeEntities(text) {
+    if (!text || text.indexOf('&') === -1) return text;
+
+    return text.replace(/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/g, (match, dec, hex, name) => {
+        if (name !== undefined) {
+            return Object.prototype.hasOwnProperty.call(htmlEntities, name) ? htmlEntities[name] : match;
+        }
+        let code = dec !== undefined ? parseInt(dec, 10) : parseInt(hex, 16);
+        if (cp1252[code]) {
+            code = cp1252[code];
+        }
+        if (code === 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) || isNaN(code)) {
+            return '�';
+        }
+        return String.fromCodePoint(code);
+    });
+}
+
 /**
  * Parse a single table node from HTML tree
  */
 function parseTableNode(tableNode, options) {
     const { firstRowAsHeader = true } = options;
 
-    // Get thead, tbody, tfoot sections
-    const thead = getChildren(tableNode, 'thead')[0];
-    const tbody = getChildren(tableNode, 'tbody')[0];
-    const tfoot = getChildren(tableNode, 'tfoot')[0];
+    // Collect all rows in display order: thead, then every tbody and any <tr>
+    // placed directly under <table> (in document order), then tfoot
+    const headRows = [];
+    const bodyRows = [];
+    const footRows = [];
 
-    // Collect all rows in order: thead, tbody, tfoot
-    let allRows = [];
-
-    if (thead) {
-        allRows.push(...getChildren(thead, 'tr'));
+    if (tableNode.children) {
+        for (const child of tableNode.children) {
+            if (child.type === 'thead') {
+                headRows.push(...getChildren(child, 'tr'));
+            } else if (child.type === 'tbody') {
+                bodyRows.push(...getChildren(child, 'tr'));
+            } else if (child.type === 'tfoot') {
+                footRows.push(...getChildren(child, 'tr'));
+            } else if (child.type === 'tr') {
+                bodyRows.push(child);
+            }
+        }
     }
 
-    if (tbody) {
-        allRows.push(...getChildren(tbody, 'tr'));
-    } else {
-        // If no tbody, get tr directly from table
-        allRows.push(...getChildren(tableNode, 'tr'));
-    }
-
-    if (tfoot) {
-        allRows.push(...getChildren(tfoot, 'tr'));
-    }
+    const allRows = [...headRows, ...bodyRows, ...footRows];
 
     if (allRows.length === 0) {
         return {
@@ -89,10 +153,8 @@ function parseTableNode(tableNode, options) {
     const occupied = new Map(); // Map<"row,col", true>
 
     allRows.forEach((rowNode, rowIndex) => {
-        const cells = [
-            ...getChildren(rowNode, 'th'),
-            ...getChildren(rowNode, 'td')
-        ];
+        // th and td cells in document order
+        const cells = (rowNode.children || []).filter(child => child.type === 'th' || child.type === 'td');
 
         let colIndex = 0;
 
@@ -108,9 +170,10 @@ function parseTableNode(tableNode, options) {
             // Check for formula (data-formula attribute)
             const formula = getProp(cellNode, 'data-formula');
             if (formula) {
-                cellValue = formula.startsWith('=') ? formula : '=' + formula;
+                cellValue = decodeEntities(formula);
+                cellValue = cellValue.startsWith('=') ? cellValue : '=' + cellValue;
             } else {
-                cellValue = getTextContent(cellNode).trim();
+                cellValue = decodeEntities(getTextContent(cellNode)).trim();
             }
 
             // Get rowspan and colspan
@@ -156,7 +219,7 @@ function parseTableNode(tableNode, options) {
             const title = getProp(cellNode, 'title');
             if (title) {
                 const cellAddress = getCellNameFromCoords(colIndex, rowIndex);
-                comments[cellAddress] = title;
+                comments[cellAddress] = decodeEntities(title);
             }
 
             // Update max columns
@@ -310,7 +373,10 @@ export async function parseHTMLTable(input, options = {}) {
         const worksheet = parseTableNode(table, { firstRowAsHeader });
 
         return {
-            worksheets: [worksheet]
+            worksheets: [{
+                worksheetName: `Table${tableIndex + 1}`,
+                ...worksheet
+            }]
         };
     }, input, options);
 }

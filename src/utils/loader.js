@@ -34,32 +34,40 @@ export async function loadAsBuffer(input) {
 }
 
 /**
- * Load file as string - Direct, no intermediate steps
+ * Pick the encoding announced by a byte order mark, if any
+ * @param {Uint8Array} buffer
+ * @returns {string|null} 'utf-8', 'utf-16le', 'utf-16be' or null
+ */
+export function detectBOM(buffer) {
+    if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) return 'utf-8';
+    if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) return 'utf-16le';
+    if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) return 'utf-16be';
+    return null;
+}
+
+/**
+ * Load file as string
+ *
+ * Every input kind (path, File/Blob, bytes) goes through the same decoder, so
+ * the result never depends on how the file was handed over. A byte order mark
+ * wins over the requested encoding (as in browsers) and is never part of the
+ * returned text.
  */
 export async function loadAsString(input, encoding = 'utf-8') {
-    const enc = (encoding || 'utf-8').toLowerCase();
-
-    // Fast paths for UTF-8
-    if (enc === 'utf-8' || enc === 'utf8') {
-        if (typeof input === 'string') {
-            if (!fs) fs = await import('fs');
-            return fs.readFileSync(input, 'utf-8');
-        }
-        if (typeof File !== 'undefined' && input instanceof File ||
-            typeof Blob !== 'undefined' && input instanceof Blob) {
-            return input.text();
-        }
-    }
-
     const buffer = await loadAsBuffer(input);
+    const enc = detectBOM(buffer) || (encoding || 'utf-8').toLowerCase();
 
     // TextDecoder covers all WHATWG Encoding Standard labels (windows-125x,
     // iso-8859-x, koi8, shift_jis, gbk, big5, euc-jp/kr, ...) in both
-    // Node.js and browsers
+    // Node.js and browsers. It strips a BOM matching the encoding.
+    let decoder = null;
     try {
-        return new TextDecoder(enc).decode(buffer);
+        decoder = new TextDecoder(enc);
     } catch (e) {
         // Unknown label - fall back to iconv-lite below (cp437, cp850, ...)
+    }
+    if (decoder) {
+        return stripBOM(decoder.decode(buffer));
     }
 
     if (!iconv) {
@@ -70,7 +78,11 @@ export async function loadAsString(input, encoding = 'utf-8') {
             throw new Error(`Encoding '${encoding}' requires iconv-lite package. Install with: npm install iconv-lite`);
         }
     }
-    return iconv.decode(Buffer.from(buffer), encoding);
+    return stripBOM(iconv.decode(Buffer.from(buffer), encoding));
+}
+
+function stripBOM(text) {
+    return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
 }
 
 /**

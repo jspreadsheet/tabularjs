@@ -106,6 +106,11 @@ function parseCSV(str, delimiter) {
  * @returns {object} Jspreadsheet Pro format
  */
 export function parseCSVString(content, delimiter = ',') {
+    // A byte order mark is never part of the first cell
+    if (content.charCodeAt(0) === 0xFEFF) {
+        content = content.slice(1);
+    }
+
     // Parse the CSV content
     const data = parseCSV(content, delimiter);
 

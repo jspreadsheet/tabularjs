@@ -53,6 +53,133 @@ function cleanFormula(formula) {
     return formula;
 }
 
+// Excel limits: XFD = 16384 columns, 1048576 rows
+const MAX_COLUMNS = 16384;
+const MAX_ROWS = 1048576;
+
+// Shift a column (letters) or row (digits) part of a reference, unless it is absolute ($)
+function shiftReferencePart(absolute, part, offset, isColumn) {
+    if (absolute || !offset) return absolute + part;
+    const index = (isColumn ? getColumnIndex(part) : parseInt(part, 10) - 1) + offset;
+    if (index < 0 || index >= (isColumn ? MAX_COLUMNS : MAX_ROWS)) return null;
+    return isColumn ? getColumnName(index) : String(index + 1);
+}
+
+// Translate a shared formula from its master cell to a cell offset by (rowOffset, colOffset).
+// Relative references shift, absolute ($) parts do not; strings, quoted sheet names,
+// structured/external references in [...] and function or defined names are copied as is.
+export function translateFormula(formula, rowOffset, colOffset) {
+    if (!formula || (!rowOffset && !colOffset)) return formula;
+
+    // References: A1 / $A$1, whole column A:A, whole row 1:1
+    const cellRe = /^(\$?)([A-Z]{1,3})(\$?)(\d+)/;
+    const colRangeRe = /^(\$?)([A-Z]{1,3}):(\$?)([A-Z]{1,3})/;
+    const rowRangeRe = /^(\$?)(\d+):(\$?)(\d+)/;
+    const wordRe = /^[A-Za-z0-9_.\\$]+/;
+    // A reference cannot be glued to a name, number or function call
+    const isBoundary = (ch) => !ch || !/[A-Za-z0-9_.\\$('!]/.test(ch);
+
+    let out = '';
+    let i = 0;
+    while (i < formula.length) {
+        const ch = formula[i];
+
+        // String literals ("" escapes a quote) and quoted sheet names ('' escapes a quote)
+        if (ch === '"' || ch === "'") {
+            let j = i + 1;
+            while (j < formula.length) {
+                if (formula[j] === ch) {
+                    if (formula[j + 1] === ch) {
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                j++;
+            }
+            out += formula.slice(i, j + 1);
+            i = j + 1;
+            continue;
+        }
+
+        // Structured references Table1[[#This Row],[Col]] and external workbook indexes [1]
+        if (ch === '[') {
+            let depth = 0;
+            let j = i;
+            for (; j < formula.length; j++) {
+                if (formula[j] === '[') depth++;
+                else if (formula[j] === ']' && --depth === 0) break;
+            }
+            out += formula.slice(i, j + 1);
+            i = j + 1;
+            continue;
+        }
+
+        const rest = formula.slice(i);
+        const prev = formula[i - 1];
+        if (/[A-Za-z0-9_.\\$]/.test(ch) && (i === 0 || !/[A-Za-z0-9_.\\]/.test(prev))) {
+            let m;
+            let translated = null;
+
+            if ((m = cellRe.exec(rest)) && isBoundary(rest[m[0].length]) &&
+                getColumnIndex(m[2]) < MAX_COLUMNS && parseInt(m[4], 10) >= 1 && parseInt(m[4], 10) <= MAX_ROWS) {
+                const col = shiftReferencePart(m[1], m[2], colOffset, true);
+                const row = shiftReferencePart(m[3], m[4], rowOffset, false);
+                translated = col === null || row === null ? '#REF!' : col + row;
+            } else if ((m = colRangeRe.exec(rest)) && isBoundary(rest[m[0].length])) {
+                const start = shiftReferencePart(m[1], m[2], colOffset, true);
+                const end = shiftReferencePart(m[3], m[4], colOffset, true);
+                translated = start === null || end === null ? '#REF!' : start + ':' + end;
+            } else if ((m = rowRangeRe.exec(rest)) && isBoundary(rest[m[0].length])) {
+                const start = shiftReferencePart(m[1], m[2], rowOffset, false);
+                const end = shiftReferencePart(m[3], m[4], rowOffset, false);
+                translated = start === null || end === null ? '#REF!' : start + ':' + end;
+            }
+
+            if (translated !== null) {
+                out += translated;
+                i += m[0].length;
+                continue;
+            }
+
+            // Not a reference: copy the whole name or number so its tail is not read as one
+            m = wordRe.exec(rest);
+            out += m[0];
+            i += m[0].length;
+            continue;
+        }
+
+        out += ch;
+        i++;
+    }
+
+    return out;
+}
+
+// Decode XML entities in a single pass, so "&amp;lt;" becomes "&lt;" and not "<"
+const xmlEntities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+function decodeXmlEntities(text) {
+    return text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (match, entity) => {
+        if (entity[0] !== '#') return xmlEntities[entity.toLowerCase()];
+        const code = entity[1] === 'x' || entity[1] === 'X' ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
+        return code <= 0x10FFFF ? String.fromCodePoint(code) : match;
+    });
+}
+
+// Get the text of a string item (<si> or inline <is>): plain <t> or rich text runs <r><t>, skipping phonetic runs (<rPh>)
+function getStringItemText(isNode) {
+    let text = '';
+    (isNode.children || []).forEach(child => {
+        if (child.type === 't') {
+            text += getTextContent(child);
+        } else if (child.type === 'r') {
+            text += findNodes(child, 't').map(t => getTextContent(t)).join('');
+        }
+    });
+
+    return decodeXmlEntities(text);
+}
+
 // Parse shared strings
 async function parseSharedStrings(zip) {
     const sharedStrings = [];
@@ -67,10 +194,7 @@ async function parseSharedStrings(zip) {
     const stringItems = findNodes(parsed, 'si');
 
     stringItems.forEach(si => {
-        // Get text from <t> elements
-        const textNodes = findNodes(si, 't');
-        const text = textNodes.map(t => getTextContent(t)).join('');
-        sharedStrings.push(text);
+        sharedStrings.push(getStringItemText(si));
     });
 
     return sharedStrings;
@@ -1288,6 +1412,9 @@ async function parseWorksheet(zip, sheetPath, sheetIndex, sharedStrings, styles)
         }
     });
 
+    // Shared formula masters by si: { formula, row, col }
+    const sharedFormulas = {};
+
     // Parse rows
     const rows = findNodes(parsed, 'row');
     rows.forEach(row => {
@@ -1333,14 +1460,21 @@ async function parseWorksheet(zip, sheetPath, sheetIndex, sharedStrings, styles)
                     // Boolean
                     value = rawValue === '1';
                 } else if (cellType === 'e') {
-                    // Error
-                    value = `#${rawValue}`;
+                    // Error, already stored as Excel shows it (#VALUE!, #N/A, ...)
+                    value = rawValue.startsWith('#') ? rawValue : `#${rawValue}`;
                 } else if (cellType === 'str') {
                     // String formula result
                     value = rawValue;
                 } else {
-                    // Number
-                    value = parseFloat(rawValue) || rawValue;
+                    // Number (0 included; -0 normalized to 0); anything non-numeric is kept as text
+                    const num = rawValue.trim() === '' ? NaN : Number(rawValue);
+                    value = isNaN(num) ? rawValue : (num === 0 ? 0 : num);
+                }
+            } else if (cellType === 'inlineStr') {
+                // Inline string (openpyxl and other generators): <is><t>..</t></is> or rich <is><r><t>..</t></r></is>
+                const isNode = findNodes(cell, 'is')[0];
+                if (isNode) {
+                    value = getStringItemText(isNode);
                 }
             }
 
@@ -1348,10 +1482,23 @@ async function parseWorksheet(zip, sheetPath, sheetIndex, sharedStrings, styles)
             const fNode = findNodes(cell, 'f')[0];
             let finalValue = value;
             if (fNode) {
+                const fAttrs = parseAttributes(fNode);
                 const formula = getTextContent(fNode);
+                let cleanedFormula = null;
                 if (formula) {
-                    // Clean up Excel internal references and store formula in data with = prefix
-                    const cleanedFormula = cleanFormula(formula);
+                    // Clean up Excel internal references
+                    cleanedFormula = cleanFormula(formula);
+                    if (fAttrs.t === 'shared' && fAttrs.si !== undefined) {
+                        // Master cell of a shared formula
+                        sharedFormulas[fAttrs.si] = { formula: cleanedFormula, row: coords.row, col: coords.col };
+                    }
+                } else if (fAttrs.t === 'shared' && sharedFormulas[fAttrs.si]) {
+                    // Dependent cell: translate the master formula to this position
+                    const master = sharedFormulas[fAttrs.si];
+                    cleanedFormula = translateFormula(master.formula, coords.row - master.row, coords.col - master.col);
+                }
+                if (cleanedFormula) {
+                    // Store formula in data with = prefix
                     finalValue = '=' + cleanedFormula;
                 }
             }

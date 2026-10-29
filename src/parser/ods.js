@@ -311,6 +311,10 @@ function parseRichText(node) {
         }
 
         if (typeof n === 'object') {
+            // Comments are not part of the cell text
+            if (n.type === 'office:annotation') {
+                return;
+            }
             // Handle text:span (formatted text) - these have style
             if (n.type === 'text:span') {
                 hasFormatting = true;
@@ -434,13 +438,46 @@ function parseChart(objectNode, rowIndex, colIndex) {
     };
 }
 
+// Helper: Text content of a node, leaving out comments (office:annotation) and their metadata
+function getTextWithoutAnnotations(node) {
+    if (!node) return '';
+    if (Array.isArray(node)) {
+        // Each <text:p> of a multi-line cell is one line
+        let text = '';
+        let paragraphs = 0;
+        for (const n of node) {
+            const part = getTextWithoutAnnotations(n);
+            if (n && n.type === 'text:p' && paragraphs++ > 0) {
+                text += '\n';
+            }
+            text += part;
+        }
+        return text;
+    }
+    if (typeof node === 'object' && node.type === 'office:annotation') {
+        return '';
+    }
+    if (typeof node === 'object' && node.type !== '#text' && node.children) {
+        return getTextWithoutAnnotations(node.children);
+    }
+    return getTextContent(node);
+}
+
 // Helper: Parse comment/annotation
 function parseComment(annotationNode, rowIndex, colIndex) {
     const attrs = parseAttributes(annotationNode);
+    const children = annotationNode.children || [];
+    const findChild = (type) => children.find(n => n.type === type);
+
+    // ODF stores the author and date as <dc:creator>/<dc:date> children and the text as <text:p> paragraphs
+    const paragraphs = children
+        .filter(n => n.type !== 'dc:creator' && n.type !== 'dc:date' && n.type !== 'meta:date-string')
+        .map(n => getTextContent(n));
+
     const comment = {
-        author: attrs['office:author'] || '',
-        date: attrs['office:date'] || '',
-        text: getTextContent(annotationNode)
+        author: getTextContent(findChild('dc:creator')) || attrs['office:author'] || '',
+        date: getTextContent(findChild('dc:date')) || attrs['office:date'] || '',
+        text: paragraphs.join('\n')
     };
 
     // Try to find display attribute
@@ -449,6 +486,105 @@ function parseComment(annotationNode, rowIndex, colIndex) {
     }
 
     return comment;
+}
+
+// Helper: Decode the XML entities left in attribute values by the parser (single pass)
+function decodeXMLEntities(text) {
+    const named = { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'" };
+    return text.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(quot|amp|lt|gt|apos));/g, (match, dec, hex, name) => {
+        if (name) return named[name];
+        const code = dec !== undefined ? parseInt(dec, 10) : parseInt(hex, 16);
+        return code > 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : match;
+    });
+}
+
+// Helper: Sheet name in Excel syntax, quoted when it is not a plain identifier
+function formatSheetName(name) {
+    const plain = /^[A-Za-z_À-￿][A-Za-z0-9_.À-￿]*$/.test(name) &&
+        !/^[A-Za-z]{1,3}\d+$/.test(name) &&
+        !/^[Rr]\d*[Cc]\d*$/.test(name) &&
+        !/^(TRUE|FALSE)$/i.test(name);
+    return plain ? name : "'" + name.replace(/'/g, "''") + "'";
+}
+
+// Sheet locator: optional "$" (absolute) and a plain or single-quoted sheet name ('' escapes a quote)
+const odsSheet = "\\$?(?:'(?:[^']|'')*'|[^.':\\[\\]]+)";
+// Cell, whole column or whole row: A1, $A$1, A, $A, 1, $1
+const odsCell = '\\$?[A-Za-z]+\\$?\\d+|\\$?[A-Za-z]+|\\$?\\d+';
+const odsReference = new RegExp('^(' + odsSheet + ')?\\.(' + odsCell + ')(?::(' + odsSheet + ')?\\.(' + odsCell + '))?$');
+
+// Helper: Convert the contents of an OpenFormula reference ([.A1], [$Sheet.A1:.B2], ...) to Excel A1 syntax
+function convertODSReference(inner) {
+    const match = inner.match(odsReference);
+    if (!match) return null;
+
+    const unquote = (sheet) => {
+        if (!sheet) return '';
+        sheet = sheet.replace(/^\$/, '');
+        return sheet.startsWith("'") ? sheet.slice(1, -1).replace(/''/g, "'") : sheet;
+    };
+
+    const sheet1 = unquote(match[1]);
+    const sheet2 = unquote(match[3]);
+    const cell1 = match[2].toUpperCase();
+    const cell2 = match[4] ? match[4].toUpperCase() : null;
+
+    let prefix = '';
+    if (sheet1 && sheet2 && sheet2 !== sheet1) {
+        // Range spanning several sheets (3D reference): Sheet1:Sheet3!A1:B2
+        const plain = formatSheetName(sheet1) === sheet1 && formatSheetName(sheet2) === sheet2;
+        prefix = plain ? `${sheet1}:${sheet2}!` : "'" + `${sheet1}:${sheet2}`.replace(/'/g, "''") + "'!";
+    } else if (sheet1 || sheet2) {
+        prefix = formatSheetName(sheet1 || sheet2) + '!';
+    }
+
+    return prefix + cell1 + (cell2 ? ':' + cell2 : '');
+}
+
+// Helper: Convert an ODS formula (table:formula) to Excel syntax
+function convertODSFormula(formula) {
+    // Remove the namespace prefix ("of:=", "oooc:=", ...) and decode entities
+    const source = decodeXMLEntities(formula.replace(/^[a-z]+:(?==)/, ''));
+    let output = '';
+    let i = 0;
+
+    while (i < source.length) {
+        const ch = source[i];
+
+        if (ch === '"') {
+            // String literal, copied untouched ("" escapes a quote)
+            let j = i + 1;
+            while (j < source.length && !(source[j] === '"' && source[j + 1] !== '"')) {
+                j += source[j] === '"' ? 2 : 1;
+            }
+            output += source.slice(i, j + 1);
+            i = j + 1;
+        } else if (ch === '[') {
+            // Reference: find the closing bracket, skipping quoted sheet names
+            let j = i + 1;
+            while (j < source.length && source[j] !== ']') {
+                if (source[j] === "'") {
+                    j++;
+                    while (j < source.length && !(source[j] === "'" && source[j + 1] !== "'")) {
+                        j += source[j] === "'" ? 2 : 1;
+                    }
+                }
+                j++;
+            }
+            const converted = convertODSReference(source.slice(i + 1, j));
+            output += converted !== null ? converted : source.slice(i, j + 1);
+            i = j + 1;
+        } else if (ch === ';') {
+            // ODS argument separator
+            output += ',';
+            i++;
+        } else {
+            output += ch;
+            i++;
+        }
+    }
+
+    return output;
 }
 
 // Helper: Parse data validation
@@ -720,7 +856,7 @@ function parseTable(tableNode, styles, numberFormats, tableStyles = {}) {
 
                             // Extract cell value
                             if (valueType === 'string') {
-                                value = getTextContent(cellNode);
+                                value = getTextWithoutAnnotations(cellNode);
                             } else if (valueType === 'float') {
                                 value = parseFloat(cellAttrs['office:value']) || 0;
                             } else if (valueType === 'percentage') {
@@ -735,7 +871,7 @@ function parseTable(tableNode, styles, numberFormats, tableStyles = {}) {
                                 value = cellAttrs['office:boolean-value'] === 'true';
                             } else {
                                 // Default to text content
-                                value = getTextContent(cellNode);
+                                value = getTextWithoutAnnotations(cellNode);
                             }
 
                             // Handle formulas
@@ -821,24 +957,8 @@ function parseTable(tableNode, styles, numberFormats, tableStyles = {}) {
                                 const col = colIndex + c;
                                 // If cell has formula, export formula string instead of calculated value
                                 if (formula && c === 0) {
-                                    // Clean ODS formula format: remove "of:" prefix and convert to Excel format
-                                    let cleanFormula = formula.replace(/^of:/, '');
-
-                                    // Decode HTML entities
-                                    cleanFormula = cleanFormula
-                                        .replace(/&quot;/g, '"')
-                                        .replace(/&lt;/g, '<')
-                                        .replace(/&gt;/g, '>')
-                                        .replace(/&amp;/g, '&');
-
-                                    // Convert ODS range references [.A1:.B10] or [.$A$1:.$B$10] to Excel format A1:B10
-                                    cleanFormula = cleanFormula.replace(/\[\.(\$?)([A-Z]+)(\$?)(\d+):\.(\$?)([A-Z]+)(\$?)(\d+)\]/g, '$1$2$3$4:$5$6$7$8');
-
-                                    // Convert ODS cell references [.A1] or [.$A$1] to Excel format A1 or $A$1
-                                    cleanFormula = cleanFormula.replace(/\[\.(\$?)([A-Z]+)(\$?)(\d+)\]/g, '$1$2$3$4');
-
-                                    // Convert ODS semicolons to Excel commas in function arguments
-                                    cleanFormula = cleanFormula.replace(/;/g, ',');
+                                    // Convert ODS formula syntax (of:=, [.A1], [$Sheet.A1:.B2], ;) to Excel format
+                                    const cleanFormula = convertODSFormula(formula);
 
                                     result.data[currentRow][col] = cleanFormula;
                                 } else {

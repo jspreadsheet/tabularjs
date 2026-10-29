@@ -16,7 +16,7 @@ export function parseDIFString(fileContent) {
     const comments = [];
     let currentRow = null;
     let currentLabelRow = null;
-    let numVectors = 0; // Number of columns
+    let numVectors = 0; // VECTORS header (columns per spec, but Excel writes the row count)
     let numTuples = 0;  // Number of rows
     let tableVersion = '';
 
@@ -148,7 +148,9 @@ export function parseDIFString(fileContent) {
                 continue;
             }
 
+            // Other entry types (e.g. numeric) take two lines as well
             i += 2;
+            continue;
         }
 
         // Process DATA section
@@ -170,10 +172,7 @@ export function parseDIFString(fileContent) {
                     if (i + 1 < lines.length) {
                         const nextLine = lines[i + 1].trim();
                         if (nextLine === 'EOD' || nextLine === '') {
-                            // End of data
-                            if (currentRow !== null && currentRow.length > 0) {
-                                data.push(currentRow);
-                            }
+                            // End of data - the pending row is pushed once, after the loop
                             break;
                         }
                     }
@@ -188,13 +187,27 @@ export function parseDIFString(fileContent) {
                 continue;
             }
 
-            // 0,value indicates a numeric value
+            // 0,value indicates a numeric value; the next line is the value indicator:
+            // V (number), TRUE/FALSE (boolean, value 1/0), NA (not available) or ERROR
             if (type === 0) {
-                const numValue = parseFloat(value);
-                if (currentRow !== null) {
-                    currentRow.push(isNaN(numValue) ? '' : numValue);
+                const indicator = i + 1 < lines.length ? lines[i + 1].trim().toUpperCase() : 'V';
+                let cellValue;
+                if (indicator === 'TRUE') {
+                    cellValue = true;
+                } else if (indicator === 'FALSE') {
+                    cellValue = false;
+                } else if (indicator === 'NA') {
+                    cellValue = '#N/A';
+                } else if (indicator === 'ERROR') {
+                    cellValue = '#VALUE!';
+                } else {
+                    const numValue = parseFloat(value);
+                    cellValue = isNaN(numValue) ? '' : numValue;
                 }
-                i += 2; // Skip next line (usually empty for numbers)
+                if (currentRow !== null) {
+                    currentRow.push(cellValue);
+                }
+                i += 2; // Skip the value indicator line
                 continue;
             }
 
@@ -255,8 +268,9 @@ export function parseDIFString(fileContent) {
         data.push(currentRow);
     }
 
-    // Determine the number of columns (use the max from rows or VECTORS header)
-    let maxColumns = numVectors > 0 ? numVectors : 0;
+    // Determine the number of columns from the widest row. The VECTORS header is not
+    // reliable: LibreOffice writes the column count there, Excel the row count
+    let maxColumns = 0;
     data.forEach(row => {
         if (row.length > maxColumns) {
             maxColumns = row.length;

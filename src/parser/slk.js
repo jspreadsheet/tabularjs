@@ -126,6 +126,31 @@ function decodeSLKString(str) {
 }
 
 /**
+ * Split a SYLK record into its fields on ';'
+ * A literal ';' inside a field is escaped as ';;'
+ */
+function splitRecord(str) {
+    const parts = [];
+    let current = '';
+    for (let i = 0; i < str.length; i++) {
+        const ch = str.charAt(i);
+        if (ch === ';') {
+            if (str.charAt(i + 1) === ';') {
+                current += ';';
+                i++;
+            } else {
+                parts.push(current);
+                current = '';
+            }
+        } else {
+            current += ch;
+        }
+    }
+    parts.push(current);
+    return parts;
+}
+
+/**
  * Parse SYLK/SLK parameter
  */
 function parseParam(param) {
@@ -221,7 +246,7 @@ export function parseSLKString(fileContent) {
 
         // Parse Format record
         if (recordType === 'F') {
-            const parts = line.substring(2).split(';');
+            const parts = splitRecord(line).slice(1);
             let formatId = null;
             const formatProps = {};
 
@@ -320,7 +345,7 @@ export function parseSLKString(fileContent) {
 
         // Parse column Width record
         if (recordType === 'W') {
-            const parts = line.substring(2).split(';');
+            const parts = splitRecord(line).slice(1);
             let col = currentCol;
             let width = null;
 
@@ -343,7 +368,7 @@ export function parseSLKString(fileContent) {
         // Parse cell record
         if (recordType === 'C') {
             // Split by semicolon to get parameters
-            const parts = line.substring(2).split(';');
+            const parts = splitRecord(line).slice(1);
 
             let row = currentRow;
             let col = currentCol;
@@ -499,7 +524,7 @@ export function parseSLKString(fileContent) {
 
         // Parse bounds record (optional, defines sheet dimensions)
         if (recordType === 'B') {
-            const parts = line.substring(2).split(';');
+            const parts = splitRecord(line).slice(1);
             for (const part of parts) {
                 if (!part) continue;
                 const param = parseParam(part);
@@ -559,13 +584,14 @@ export function parseSLKString(fileContent) {
  * Parse SLK file - works in both Browser and Node.js
  * @param {string|File|Uint8Array} input - File path (Node.js), File object (Browser), or buffer
  * @param {Object} options - Parser options
+ * @param {string} options.encoding - Character encoding (default: 'utf-8'). Common values: 'windows-1252', 'latin1', 'cp850'
  * @param {Function} options.onload - Callback when parsing completes
  * @param {Function} options.onerror - Callback when parsing fails
  * @returns {Promise<object>} Jspreadsheet Pro format
  */
 export async function parseSLK(input, options = {}) {
-    return parse(async (inp) => {
-        const content = await loadAsString(inp);
+    return parse(async (inp, opts) => {
+        const content = await loadAsString(inp, opts.encoding);
         return parseSLKString(content);
     }, input, options);
 }

@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-10-29
+
+### Added
+- **Lotus 1-2-3 WK3, WK4 and .123 files** (1-2-3 97 / Millennium) now return their data: numbers (10-byte, packed and IEEE), labels, formula results, error/NA cells, notes as comments, sheet names, column widths and hidden columns. Text is decoded from LMBCS. The layout is chosen from the BOF version, so a Millennium file saved as .wks also works. Formulas are not decoded (calculated values, as for WK1). Checked against LibreOffice's test files
+- **Wrong extensions**: a file whose content clearly belongs to another format (an .xlsx renamed .xls, an .xls saved as .xlsx, a CSV/HTML/XML 2003 file saved as .xls) is parsed as what it really is. `options.extension` is never overridden
+- **Encrypted .xlsx**: a password-protected .xlsx reports "Workbook is encrypted with a password" instead of a zip error
+
+### Fixed
+- **XLSX**: shared formulas reached only the first cell of their range; every cell now gets its own formula (references shifted like Excel does, `$` parts kept). On real files this restores tens of thousands of formulas
+- **XLSX**: inline strings (`t="inlineStr"`, written by openpyxl and many generators) came back empty
+- **XLSX**: a numeric 0 came back as the string `"0"`
+- **XLSX**: error cells read `##VALUE!` instead of `#VALUE!`
+- **XLSX**: shared strings left XML entities undecoded (`&amp;`) and appended phonetic (furigana) readings to the text
+- **DIF**: the last row was duplicated in every file; rows were padded to the VECTORS count, so Excel files came back with as many columns as rows (52 x 52 instead of 52 x 17); TRUE/FALSE came back as 1/0 and NA/ERROR as 0 (now `true`/`false`, `#N/A`, `#VALUE!`); a LABEL section skipped lines
+- **SYLK**: text with an escaped semicolon (`;;`) was cut off; `options.encoding` was ignored
+- **HTML**: only the first `<tbody>` was read; `<th>` cells were moved in front of `<td>` cells in mixed rows; entities (`&amp;`, `&eacute;`, `&#8212;`...) were not decoded in Node.js; with `tableIndex` the worksheet had no name
+- **ODS**: comment text (with its author and date) was prepended to the cell value; comments now carry author, date and text separately. References to other sheets stayed in OpenDocument syntax (`[$Rates.A1]`) and now read `Rates!A1`; semicolons inside formula strings are no longer turned into commas; the paragraphs of a multi-line cell are separated by line breaks
+- **CSV/TSV/TXT**: a UTF-8 BOM stayed glued to the first cell when the file was passed as a path; UTF-16 files with a BOM are decoded correctly
+- **Node.js**: `File` objects (from `FormData` in Next.js, undici...) failed for .xlsx and .ods
+- `onload` / `onerror` fire exactly once per call
+- Entity decoding no longer decodes twice (`&amp;lt;` stays `&lt;`)
+- 107 new regression tests (540 total), plus checks against the LibreOffice import test files and openpyxl's formula translation
+
+### Changed
+- README: live test-status and downloads badges (the static badge said 312 tests), links to the website, docs, demo and llms.txt
+- Browser bundle: 196 KiB to 217 KiB (HTML entity table, WK3/123 parser)
+
 ## [2.1.1] - 2026-10-28
 
 ### Fixed

@@ -1,10 +1,15 @@
 # TabularJS
 
 [![npm version](https://badge.fury.io/js/tabularjs.svg)](https://www.npmjs.com/package/tabularjs)
+[![npm downloads](https://img.shields.io/npm/dm/tabularjs.svg)](https://www.npmjs.com/package/tabularjs)
+[![Tests](https://github.com/jspreadsheet/tabularjs/actions/workflows/test.yml/badge.svg)](https://github.com/jspreadsheet/tabularjs/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-312%20passing-brightgreen.svg)](https://github.com/jspreadsheet/tabularjs)
 
 A professional JavaScript library for converting spreadsheet files to JSON format. Supports 16+ file formats for use in Node.js and browser applications.
+
+**[Website](https://tabularjs.com)** · **[Documentation](https://tabularjs.com/docs/)** · **[API reference](https://tabularjs.com/docs/api/)** · **[Live demo](https://tabularjs.com/demo/)** · **[Free online converters](https://tabularjs.com/tools/)**
+
+> Using an AI coding assistant? Point it at [tabularjs.com/llms.txt](https://tabularjs.com/llms.txt): the API, the output shape and the most common mistakes in one plain-text file.
 
 ## Features
 

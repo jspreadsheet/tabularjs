@@ -514,6 +514,14 @@ describe('String Utility Functions', () => {
         it('should handle text without entities', () => {
             expect(decodeHTMLEntities('plain text')).to.equal('plain text');
         });
+
+        it('should decode only once (an escaped entity stays an entity)', () => {
+            expect(decodeHTMLEntities('&amp;lt;b&amp;gt;')).to.equal('&lt;b&gt;');
+        });
+
+        it('should decode numeric character references', () => {
+            expect(decodeHTMLEntities('&#65;&#x42;&#x1F600;')).to.equal('AB\u{1F600}');
+        });
     });
 
     describe('convertR1C1toA1', () => {

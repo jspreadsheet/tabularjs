@@ -553,15 +553,15 @@ const readFloat64LE = function(buffer, offset) {
 
 // Export functions for use in other modules
 /**
- * Decode HTML entities
+ * Decode the XML entities and numeric character references in one pass, so "&amp;lt;" stays "&lt;"
  */
+const XML_ENTITIES = { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'" };
 const decodeHTMLEntities = function(text) {
-    return text
-        .replace(/&quot;/gi, '"')
-        .replace(/&amp;/gi, '&')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/&apos;/gi, "'");
+    return text.replace(/&(?:#(\d+)|#x([0-9a-f]+)|(quot|amp|lt|gt|apos));/gi, (match, dec, hex, name) => {
+        if (name) return XML_ENTITIES[name.toLowerCase()];
+        const code = dec !== undefined ? parseInt(dec, 10) : parseInt(hex, 16);
+        return code <= 0x10FFFF ? String.fromCodePoint(code) : '�';
+    });
 };
 
 /**
